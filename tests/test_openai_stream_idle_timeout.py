@@ -126,18 +126,23 @@ def test_a_stalled_stream_still_cancels_the_run(short_idle, registry):
     # _cancel_agent_request; a timeout that skipped it would leave the worker
     # parked in run_chat holding _SESSION_LOCKS[...] indefinitely.
     released = threading.Event()
-    observed = {}
 
     def run_chat(query, session_id, send_chunk, **kwargs):
         send_chunk({"chunk_type": "content", "delta": "hello"})
-        observed["event"] = registry.get_event(COMPLETION_ID)
         released.wait(10)
 
     frames = _stream(run_chat)
-    collected = _drain(frames)
+    # Read the entry from this thread. _stream_completion registers and starts
+    # the worker before it returns the generator, and run_chat stays parked in
+    # released.wait(), so the entry is here deterministically -- reading it
+    # from inside run_chat would race the worker reaching that line.
+    cancel_event = registry.get_event(COMPLETION_ID)
+    try:
+        collected = _drain(frames)
+    finally:
+        released.set()
     body = "".join(collected)
 
-    cancel_event = observed.get("event")
     assert cancel_event is not None, "the run must be registered as cancellable"
     assert cancel_event.is_set(), "the stalled run must be cancelled"
     assert "data: [DONE]" in collected[-1]
