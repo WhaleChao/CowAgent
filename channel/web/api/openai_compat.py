@@ -28,6 +28,12 @@ _SESSION_LOCKS = tuple(threading.Lock() for _ in range(64))
 _STREAM_END = object()
 _STREAM_ERROR = object()
 _FIRST_EVENT_TIMEOUT_SECONDS = 30
+# The first event has a budget; the rest of the stream used to have none, so a
+# model call that never returned left the consumer parked on output.get()
+# forever -- its cleanup never ran and the worker kept the session lock. The
+# web SSE stream bounds the same wait at 600s; a tool-heavy turn can be slow,
+# so this matches that rather than the tighter first-event budget.
+_STREAM_IDLE_TIMEOUT_SECONDS = 600
 
 
 def _authenticate(authorization: str, external_api_token: str) -> None:
@@ -314,6 +320,7 @@ def _stream_completion(
             yield _sse_frame(
                 _base_chunk(completion_id, created, model, {"role": "assistant"})
             )
+            timed_out = False
             while item is not _STREAM_END:
                 if item is _STREAM_ERROR:
                     finish_reason = "error"
@@ -331,8 +338,33 @@ def _stream_completion(
                     )
                 else:
                     yield _sse_frame(item)
-                item = output.get()
-            completed = True
+                try:
+                    item = output.get(timeout=_STREAM_IDLE_TIMEOUT_SECONDS)
+                except queue.Empty:
+                    # The worker stopped producing without ending the stream.
+                    # Say so instead of holding the socket open indefinitely.
+                    # completed stays False so the finally below still cancels
+                    # the run -- the worker is parked in run_chat holding the
+                    # session lock, and only a cancel releases it.
+                    timed_out = True
+                    finish_reason = "error"
+                    yield _sse_frame(
+                        _base_chunk(
+                            completion_id,
+                            created,
+                            model,
+                            {},
+                            cow_event={
+                                "type": "error",
+                                "message": (
+                                    "CowAgent stopped producing events before the "
+                                    "stream finished."
+                                ),
+                            },
+                        )
+                    )
+                    break
+            completed = not timed_out
             yield _sse_frame(
                 _base_chunk(
                     completion_id,
