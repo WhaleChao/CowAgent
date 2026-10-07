@@ -69,12 +69,12 @@ def _configured_workspaces(config: dict, fallback: Path):
         from agent.registry import AgentRegistry
 
         registry = AgentRegistry.from_config(config)
-        return registry.list(), True
+        return registry.list(), True, registry.default_agent_id
     from agent.registry import AgentProfile
 
     return [
         AgentProfile("default", "Default", str(Path(fallback).resolve()))
-    ], False
+    ], False, "default"
 
 
 def _legacy_user_data_path(data_root: Path, config: dict) -> Path:
@@ -136,7 +136,7 @@ def create_backup_archive(
         # being archived rather than from wherever config.json happens to point.
         config = _team().resolve({**config, "agent_workspace": str(workspace)})
     legacy_path = _legacy_user_data_path(data_root, config)
-    profiles, explicit_registry = _configured_workspaces(config, workspace)
+    profiles, explicit_registry, default_agent_id = _configured_workspaces(config, workspace)
     sources = {
         profile.id: Path(profile.workspace).expanduser().resolve()
         for profile in profiles
@@ -177,7 +177,7 @@ def create_backup_archive(
                 source
                 for profile, source, _, _, _ in workspace_entries
                 if profile.id
-                == (config.get("default_agent_id") if explicit_registry else "default")
+                == default_agent_id
             )
         ),
         "agents": [
