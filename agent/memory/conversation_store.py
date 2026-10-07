@@ -584,6 +584,27 @@ def _group_into_display_turns(
     return turns
 
 
+# A page window arrives from an HTTP query string or a cloud-protocol payload,
+# so it is untrusted. Both bounds are needed: a negative page_size reaches
+# SQLite as LIMIT -1, which means "no limit", and page_size=0 divides by zero
+# while locating the until_seq page. The cap keeps a single request from asking
+# one database for its whole table. Matches MemoryService.MAX_PAGE_SIZE.
+MAX_PAGE_SIZE = 200
+
+
+def _page_window(page: Any, page_size: Any, default_page_size: int) -> tuple:
+    """Clamp an untrusted (page, page_size) pair into a usable window."""
+    try:
+        page = int(page)
+    except (TypeError, ValueError):
+        page = 1
+    try:
+        page_size = int(page_size)
+    except (TypeError, ValueError):
+        page_size = default_page_size
+    return max(1, page), max(1, min(page_size, MAX_PAGE_SIZE))
+
+
 class ConversationStore:
     """
     SQLite-backed store for per-session conversation history.
@@ -1696,6 +1717,8 @@ class ConversationStore:
         Pages are numbered from 1 (most recent).  Messages within a page are
         returned in chronological order.
 
+        ``page`` and ``page_size`` are clamped to ``[1, MAX_PAGE_SIZE]``.
+
         Returns:
             {
                 "messages": [
@@ -1713,7 +1736,7 @@ class ConversationStore:
                 "has_more": bool,
             }
         """
-        page = max(1, page)
+        page, page_size = _page_window(page, page_size, 20)
         with self._lock:
             conn = self._connect()
             try:
@@ -1868,6 +1891,8 @@ class ConversationStore:
         the rows on the same page, so a pin still reaches the top of the list
         when the conversation is old enough to sit several pages down.
 
+        ``page`` and ``page_size`` are clamped to ``[1, MAX_PAGE_SIZE]``.
+
         Returns:
             {
                 "sessions": [{session_id, title, created_at, last_active,
@@ -1878,7 +1903,7 @@ class ConversationStore:
                 "has_more": bool,
             }
         """
-        page = max(1, page)
+        page, page_size = _page_window(page, page_size, 50)
         with self._lock:
             conn = self._connect()
             try:
