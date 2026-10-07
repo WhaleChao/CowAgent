@@ -26,12 +26,18 @@ workspace = Path('workspace').resolve()
 service = KnowledgeService(str(workspace), OwnedIndex())
 paths = json.loads(Path('documents.json').read_text(encoding='utf-8'))
 persisted = [service.create_document(path, '# Owned guide\\n') for path in paths]
-result = CliRunner().invoke(knowledge, ['list'])
+if Path('non-symbolic-link-boundary').exists():
+    from unittest.mock import patch
+    # Model a directory junction's classification using a real owned alias.
+    with patch('os.path.islink', return_value=False):
+        result = CliRunner().invoke(knowledge, ['list'])
+else:
+    result = CliRunner().invoke(knowledge, ['list'])
 print(json.dumps({'persisted': persisted, 'exit': result.exit_code, 'output': result.output}))
 """
 
 
-def invoke(tmp_path, documents, cycle=False, root_link=False):
+def invoke(tmp_path, documents, cycle=False, root_link=False, junction_boundary=False):
     home, data, workspace = (tmp_path / name for name in ('home', 'data', 'workspace'))
     home.mkdir()
     data.mkdir()
@@ -53,6 +59,8 @@ def invoke(tmp_path, documents, cycle=False, root_link=False):
             pytest.skip('directory symlinks unavailable')
     (data / 'config.json').write_text(json.dumps({'agent_workspace': str(workspace)}), encoding='utf-8')
     (tmp_path / 'documents.json').write_text(json.dumps(documents), encoding='utf-8')
+    if junction_boundary:
+        (tmp_path / 'non-symbolic-link-boundary').touch()
     env = {
         'PATH': os.environ.get('PATH', ''),
         'HOME': str(home), 'USERPROFILE': str(home), 'COW_DATA_DIR': str(data),
@@ -114,3 +122,10 @@ def test_selected_knowledge_root_link_retains_category_display(tmp_path):
     output = invoke(tmp_path, ['engineering/guide.md'], root_link=True)
     assert 'engineering/ (1)' in output
     assert 'guide' in output
+
+
+def test_canonical_parent_alias_is_bounded_when_not_classified_as_symbolic(tmp_path):
+    output = invoke(tmp_path, ['guide.md'], cycle=True, junction_boundary=True)
+    assert output.count('cycle/') == 1
+    assert 'guide' in output
+    assert len(output) < 1000

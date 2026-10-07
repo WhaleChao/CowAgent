@@ -82,16 +82,17 @@ def _tree() -> str:
 
     tree_lines = ["  knowledge/"]
 
-    def scan(directory, is_root=False):
+    def scan(directory, is_root=False, ancestors=()):
         names = sorted(os.listdir(directory))
         # Keep directory links bounded to their existing shallow display:
         # recursively following them can revisit a parent indefinitely.
         children = []
-        if is_root or not os.path.islink(directory):
+        canonical = os.path.normcase(os.path.realpath(directory))
+        if (is_root or not os.path.islink(directory)) and canonical not in ancestors:
             for name in names:
                 path = os.path.join(directory, name)
                 if not name.startswith(".") and os.path.isdir(path):
-                    child = scan(path)
+                    child = scan(path, ancestors=(*ancestors, canonical))
                     children.append((name, child))
         files = [
             name for name in names
