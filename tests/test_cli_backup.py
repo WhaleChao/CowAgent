@@ -524,3 +524,71 @@ def test_restore_rejects_archive_carrying_user_scoped_workspaces(tmp_path):
 
     with pytest.raises(ValueError, match="user-scoped"):
         restore_backup_archive(archive, tmp_path / "data", tmp_path / "root")
+
+
+@pytest.mark.parametrize("style", ["ordinary", "duplicate_lists", "persisted_team"])
+def test_backup_restore_preserves_canonical_agent_lists(tmp_path, monkeypatch, style):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("COW_DATA_DIR", str(tmp_path / "data"))
+    data = tmp_path / "data"
+    a = tmp_path / "a"
+    b = tmp_path / "b"
+    a.mkdir()
+    b.mkdir()
+    (a / "MEMORY.md").write_text("agent a memory", encoding="utf-8")
+    (b / "MEMORY.md").write_text("agent b memory", encoding="utf-8")
+    pa = {"id": "a", "name": "A", "workspace": str(a)}
+    pb = {"id": "b", "name": "B", "workspace": str(b)}
+    prefix = {"agent_workspace": str(b), "default_agent_id": "b"}
+    if style == "ordinary":
+        raw = json.dumps({**prefix, "agents": [pa, pb]})
+    else:
+        raw = (json.dumps(prefix)[:-1] + ',"agents":' + json.dumps([pa])
+               + ',"agents":' + json.dumps([pb]) + "}")
+    data.mkdir()
+    (data / "config.json").write_text(raw, encoding="utf-8")
+    if style == "persisted_team":
+        _write_json(b / "agents" / "team.json", {
+            "agents": [pa, pb], "default_agent_id": "b",
+        })
+
+    archive = tmp_path / "backup.zip"
+    summary = create_backup_archive(archive, data, b)
+    assert {item["id"] for item in summary["agents"]} == {"a", "b"}
+    with zipfile.ZipFile(archive) as bundle:
+        assert bundle.read("agents/a/workspace/MEMORY.md") == b"agent a memory"
+        assert bundle.read("agents/b/workspace/MEMORY.md") == b"agent b memory"
+
+    target_data = tmp_path / "restored-data"
+    target = tmp_path / "restored-workspace"
+    result = restore_backup_archive(archive, target_data, target)
+    assert {item["id"] for item in result["agents"]} == {"a", "b"}
+    assert (target / "MEMORY.md").read_text(encoding="utf-8") == "agent b memory"
+    assert (target / "agents" / "a" / "MEMORY.md").read_text(encoding="utf-8") == "agent a memory"
+    restored = json.loads((target_data / "config.json").read_text(encoding="utf-8"))
+    registry = AgentRegistry.from_config(team.resolve(restored))
+    assert {profile.id for profile in registry.list()} == {"a", "b"}
+    assert registry.default_agent_id == "b"
+
+
+@pytest.mark.parametrize("body", [
+    '{"channel_type":["terminal","web"]}',
+    '{"channel_type":["terminal"],"channel_type":["web"]}',
+])
+def test_restore_legacy_archive_preserves_canonical_channel_lists(tmp_path, monkeypatch, body):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("COW_DATA_DIR", str(tmp_path / "data"))
+    archive = tmp_path / "legacy.zip"
+    with zipfile.ZipFile(archive, "w") as bundle:
+        bundle.writestr("manifest.json", json.dumps({"format": "cowagent-backup", "version": 1}))
+        bundle.writestr("data/config.json", body)
+        bundle.writestr("workspace/MEMORY.md", "legacy memory")
+    data = tmp_path / "data"
+    workspace = tmp_path / "workspace"
+    result = restore_backup_archive(archive, data, workspace)
+    restored = json.loads((data / "config.json").read_text(encoding="utf-8"))
+    assert restored["channel_type"] == ["terminal", "web"]
+    assert result["config_restored"] is True
+    assert (workspace / "MEMORY.md").read_text(encoding="utf-8") == "legacy memory"
