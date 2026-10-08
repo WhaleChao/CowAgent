@@ -10,6 +10,7 @@ import time
 
 from common.log import logger
 from common import i18n
+from cli.config_json import deep_merge_dicts as _deep_merge_dicts, merge_duplicate_keys
 
 # All available config keys are listed in this dict (use lowercase keys).
 # The values here are placeholders only; the program does NOT read them.
@@ -710,45 +711,16 @@ def load_config():
     config.load_user_datas()
 
 
-def _deep_merge_dicts(base: dict, incoming: dict) -> dict:
-    """Recursively merge ``incoming`` into ``base`` (incoming wins on leaves)."""
-    for key, val in incoming.items():
-        if (
-            key in base
-            and isinstance(base[key], dict)
-            and isinstance(val, dict)
-        ):
-            _deep_merge_dicts(base[key], val)
-        else:
-            base[key] = val
-    return base
-
-
 def _merge_duplicate_keys(pairs):
-    """object_pairs_hook for json.loads: deep-merge duplicate top-level keys
-    (lists concat, dicts merge, scalars take the latter) instead of dropping."""
-    out = {}
-    duplicates = []
-    for key, val in pairs:
-        if key not in out:
-            out[key] = val
-            continue
-        duplicates.append(key)
-        prev = out[key]
-        if isinstance(prev, dict) and isinstance(val, dict):
-            _deep_merge_dicts(prev, val)
-        elif isinstance(prev, list) and isinstance(val, list):
-            prev.extend(val)
-        else:
-            out[key] = val
-    if duplicates:
+    """Merge duplicate keys with the app's existing diagnostic behavior."""
+    def report_duplicates(unique):
         # logger may not be wired yet — fall back to print so we never lose the warning.
-        unique = sorted(set(duplicates))
         try:
             logger.warning("[INIT] config.json has duplicate keys (merged): %s", unique)
         except Exception:
             print("[INIT] config.json has duplicate keys (merged):", unique)
-    return out
+
+    return merge_duplicate_keys(pairs, on_duplicates=report_duplicates)
 
 
 def _migrate_chat_fallback(cfg) -> None:
