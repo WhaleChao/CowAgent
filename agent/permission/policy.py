@@ -286,26 +286,98 @@ _SEPARATORS = frozenset({";", "&&", "||", "|", "&", "|&", "(", ")", "{", "}", "\
 
 _OPERATOR_CHARS = set("<>&|;()")
 
+# A backquote is not a quoting character to shlex in posix mode, so
+# ``echo `rm -rf x``` lexes as one token and the gated command inside it is
+# never classified. Its contents are a command the shell runs, so they have to
+# become segments of their own.
+_BACKTICK_RE = re.compile(r"(?<!\\)`([^`]*)`")
+
+# ``<(cmd)`` / ``>(cmd)`` run ``cmd`` to produce a path. shlex emits ``<(`` as a
+# plain token, so the inner command is swallowed as arguments of the outer one.
+_PROCESS_SUBST_CHARS = frozenset({"<", ">"})
+# Stands in for a substitution the outer command merely receives as an
+# argument. Not a command name and not a path, so neither gate reads it.
+_SUBSTITUTION = "\x00"
+
 
 def _is_operator(token: str) -> bool:
     return bool(token) and all(ch in _OPERATOR_CHARS for ch in token)
 
 
-def _parse_segments(command: str) -> Optional[List[List[str]]]:
-    """Split a command line into per-command token lists, honoring quotes.
+def _split_process_substitutions(command: str) -> Tuple[str, List[str]]:
+    """Pull the bodies of ``<(...)`` / ``>(...)`` out of ``command``.
 
-    ``punctuation_chars`` makes the lexer emit ``&&``, ``|``, ``>`` and friends
-    as their own tokens while leaving quoted text alone, so ``grep "a|b"`` is one
-    command and not two. Returns None when the line cannot be lexed at all.
+    Returns the outer line with each substitution collapsed to a placeholder,
+    plus the bodies to classify on their own. Quoting is honoured so a ``(``
+    inside a string does not open a substitution.
     """
-    lexer = shlex.shlex(command or "", posix=True, punctuation_chars=True)
+    bodies: List[str] = []
+    out: List[str] = []
+    quote = ""
+    i = 0
+    while i < len(command):
+        char = command[i]
+        if quote:
+            out.append(char)
+            if char == quote and (i == 0 or command[i - 1] != "\\"):
+                quote = ""
+            i += 1
+            continue
+        if char in "'\"":
+            quote = char
+            out.append(char)
+            i += 1
+            continue
+        if char == "\\" and i + 1 < len(command):
+            out.append(command[i : i + 2])
+            i += 2
+            continue
+        if char in _PROCESS_SUBST_CHARS and command[i + 1 : i + 2] == "(":
+            depth = 1
+            j = i + 2
+            body: List[str] = []
+            while j < len(command) and depth:
+                if command[j] == "(":
+                    depth += 1
+                elif command[j] == ")":
+                    depth -= 1
+                    if not depth:
+                        j += 1
+                        break
+                body.append(command[j])
+                j += 1
+            if depth:
+                # Unbalanced: leave the text alone rather than guess.
+                out.append(command[i:j])
+            else:
+                bodies.append("".join(body))
+                out.append(_SUBSTITUTION)
+            i = j
+            continue
+        out.append(char)
+        i += 1
+    return "".join(out), bodies
+
+
+def _collect_segments(command: str, segments: List[List[str]]) -> None:
+    """Append the token lists of ``command`` (and of anything it substitutes)."""
+    command = _BACKTICK_RE.sub(
+        lambda match: f"$({match.group(1).strip()})" if match.group(1).strip() else "",
+        command,
+    )
+    outer, bodies = _split_process_substitutions(command)
+    # Substituted bodies are separate commands the shell runs; classify them
+    # before the outer line so the outer command cannot mask them.
+    for body in bodies:
+        _collect_segments(body, segments)
+
+    lexer = shlex.shlex(outer, posix=True, punctuation_chars=True)
     lexer.whitespace_split = True
     try:
         tokens = list(lexer)
     except ValueError:
-        return None
+        return
 
-    segments: List[List[str]] = []
     current: List[str] = []
     for token in tokens:
         if token in _SEPARATORS:
@@ -316,6 +388,19 @@ def _parse_segments(command: str) -> Optional[List[List[str]]]:
         current.append(token)
     if current:
         segments.append(current)
+
+
+def _parse_segments(command: str) -> Optional[List[List[str]]]:
+    """Split a command line into per-command token lists, honoring quotes.
+
+    ``punctuation_chars`` makes the lexer emit ``&&``, ``|``, ``>`` and friends
+    as their own tokens while leaving quoted text alone, so ``grep "a|b"`` is one
+    command and not two. Returns None when the line cannot be lexed at all.
+    """
+    segments: List[List[str]] = []
+    _collect_segments(command or "", segments)
+    if not segments:
+        return None
     return segments
 
 
