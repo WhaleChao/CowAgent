@@ -328,7 +328,8 @@ class SessionService:
         except Exception as e:
             logger.warning(f"[SessionService] Cancel on delete failed: {e}")
 
-    def delete_session(self, session_id: str, agent_id: str = None) -> None:
+    def delete_session(self, session_id: str, agent_id: str = None,
+                       fanout: bool = True) -> None:
         if not session_id:
             raise ValueError("session_id required")
         session_id = self._normalize_sid(session_id)
@@ -338,7 +339,33 @@ class SessionService:
         store.clear_session(session_id)
         self._forget_side_stores(session_id, agent_id)
         self._remove_agent(session_id, agent_id)
+        # A team conversation keeps one transcript per participant, so every
+        # participant has to lose this session -- otherwise the initiator's
+        # delete reports success while the others still list the conversation
+        # and read the transcript back into their context. clear_context has
+        # fanned out for this since it was written; delete never did.
+        if fanout:
+            for member_id in self._teammates(session_id, agent_id):
+                self._delete_for_teammate(session_id, member_id)
         logger.info(f"[SessionService] Session deleted: {session_id}")
+
+    def _delete_for_teammate(self, session_id: str, member_id: str) -> None:
+        """Drop one teammate's copy of a deleted session.
+
+        Best-effort, like :meth:`_clear_teammate`: one unreachable participant
+        must not turn a delete the initiator already committed into a failure.
+
+        Every Agent's transcripts live in the one shared sqlite file, so a
+        teammate that is not a separately-addressed Agent still has its rows
+        here. A peer in another process is out of reach for this path --
+        removing that copy needs a transport mode of its own, the way clearing
+        one does.
+        """
+        try:
+            self.delete_session(session_id, agent_id=member_id, fanout=False)
+        except Exception as e:
+            logger.warning(
+                f"[SessionService] Delete failed for agent '{member_id}': {e}")
 
     def _forget_side_stores(self, session_id: str, agent_id: str = None) -> None:
         """Drop the session's project binding and prefs, each best-effort."""
