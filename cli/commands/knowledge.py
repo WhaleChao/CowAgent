@@ -51,7 +51,7 @@ def _stats() -> str:
         rel_root = os.path.relpath(root, knowledge_dir)
         category = rel_root.split(os.sep)[0] if rel_root != "." else "root"
         for f in files:
-            if f.endswith(".md") and f not in ("index.md", "log.md"):
+            if f.lower().endswith(".md") and f not in ("index.md", "log.md"):
                 total_files += 1
                 total_bytes += os.path.getsize(os.path.join(root, f))
                 cat_count[category] = cat_count.get(category, 0) + 1
@@ -93,7 +93,7 @@ def _tree() -> str:
         subdir_path = os.path.join(knowledge_dir, subdir)
         md_files = sorted([
             f for f in os.listdir(subdir_path)
-            if f.endswith(".md") and not f.startswith(".")
+            if f.lower().endswith(".md") and not f.startswith(".")
         ])
         tree_lines.append(f"  {branch}{subdir}/ ({len(md_files)})")
 
@@ -102,7 +102,7 @@ def _tree() -> str:
         for j, fname in enumerate(md_files[:max_show]):
             is_last_file = (j == len(md_files[:max_show]) - 1) and len(md_files) <= max_show
             fb = "└── " if is_last_file else "├── "
-            name = fname.replace(".md", "")
+            name = fname[:-3]
             tree_lines.append(f"{child_prefix}{fb}{name}")
         if len(md_files) > max_show:
             tree_lines.append(f"{child_prefix}└── ... +{len(md_files) - max_show} more")
