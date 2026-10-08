@@ -1706,7 +1706,21 @@ class AgentStreamExecutor:
                     if finish_reason:
                         stop_reason = finish_reason
 
-                    reasoning_delta = delta.get("reasoning_content") or ""
+                    # Providers disagree on the reasoning field name: the
+                    # common OpenAI-compatible one is "reasoning_content", but
+                    # some (llama.cpp builds, OpenRouter-style gateways) stream
+                    # it as "reasoning", and a few reuse "thinking". Try them in
+                    # order so a thinking pass is never silently dropped.
+                    reasoning_delta = (
+                        delta.get("reasoning_content")
+                        or delta.get("reasoning")
+                        or delta.get("thinking")
+                        or ""
+                    )
+                    # A list-shaped reasoning payload would make str += list
+                    # blow up; route it through the block splitter.
+                    if isinstance(reasoning_delta, list):
+                        _, reasoning_delta = self._split_content_blocks(reasoning_delta)
                     if reasoning_delta:
                         full_reasoning += reasoning_delta
                         if self._is_thinking_enabled():
