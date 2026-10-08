@@ -144,7 +144,18 @@ class Query:
                     # cached text segments at once and merge them into one reply.
                     # Media (voice/image) can only be returned one at a time, so it
                     # stops the merge and is returned on its own.
-                    cached = channel.cache_dict[from_user]
+                    # Read with .get, never by indexing: cache_dict is a
+                    # defaultdict, so indexing inserts an empty list for a user
+                    # who has nothing cached. Such an entry looks real to the
+                    # guard above and to the `cache_dict.get(...) is None` test
+                    # that decides whether a new task may start, and no cleanup
+                    # path removes it -- they all require a non-empty list
+                    # first, and the IndexError below returned without deleting
+                    # the entry it had just created. One such read left the user
+                    # unable to start a task for the lifetime of the process.
+                    cached = channel.cache_dict.get(from_user)
+                    if not cached:
+                        return "success"
                     if cached[0][0] == "text":
                         reply_type = "text"
                         merged_parts = []
@@ -153,7 +164,7 @@ class Query:
                         reply_content = "\n\n".join(merged_parts)
                     else:
                         (reply_type, reply_content) = cached.pop(0)
-                    if not channel.cache_dict[from_user]:  # If draining empties the list, delete the user entry from cache
+                    if not cached:  # If draining empties the list, delete the user entry from cache
                         del channel.cache_dict[from_user]
                 except IndexError:
                     return "success"
