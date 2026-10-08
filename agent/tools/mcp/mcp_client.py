@@ -43,6 +43,11 @@ _STDIO_ENV_SENSITIVE = ("_KEY", "_SECRET", "_TOKEN", "_PASSWORD", "_PASSWD", "_C
 # already used for connecting, since the endpoint event is due immediately.
 _SSE_DISCOVERY_TIMEOUT = 10
 
+# Ceiling on a POSTed SSE response body. The transport has no natural end (the
+# server may hold the stream open with keepalive comments), so the body is read
+# in bounded chunks against self._timeout instead of one blocking read().
+_SSE_RESPONSE_MAX_BYTES = 32 * 1024 * 1024
+
 
 # Optional callback invoked after an OAuth authorization completes, so the
 # tool manager can bring the newly-authorized server online. Signature:
@@ -520,7 +525,16 @@ class McpClient:
         return endpoint
 
     def _sse_send(self, message: dict) -> dict:
-        """POST a JSON-RPC message to the server and return the response."""
+        """POST a JSON-RPC message to the server and return the response.
+
+        ``urlopen``'s timeout bounds a single socket read and every arriving
+        byte resets it, so one ``resp.read()`` waits for as long as the server
+        keeps trickling -- and the loader walks its servers serially on one
+        background thread, so a server that stalls here leaves every server
+        queued behind it "pending" with its tools silently missing. Read in
+        bounded chunks against self._timeout instead, as _read_sse_response
+        does for the streamable-http transport.
+        """
         body = json.dumps(message).encode("utf-8")
         req = urllib.request.Request(
             self._post_url,
@@ -528,9 +542,33 @@ class McpClient:
             method="POST",
             headers={"Content-Type": "application/json"},
         )
+        deadline = time.monotonic() + self._timeout
         with urllib.request.urlopen(req, timeout=30) as resp:
-            raw = resp.read().decode("utf-8")
-            return json.loads(raw)
+            buf = bytearray()
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(
+                        f"[MCP:{self.name}] SSE response read timed out after "
+                        f"{self._timeout}s"
+                    )
+                try:
+                    chunk = resp.read1(65536)
+                except AttributeError:
+                    # A response object without read1 (a stub, or an
+                    # implementation that only offers read) still has to be
+                    # bounded, so fall back to a read that cannot outlast the
+                    # remaining budget.
+                    chunk = resp.read(65536)
+                if not chunk:
+                    break
+                buf.extend(chunk)
+                if len(buf) > _SSE_RESPONSE_MAX_BYTES:
+                    raise IOError(
+                        f"[MCP:{self.name}] SSE response exceeded "
+                        f"{_SSE_RESPONSE_MAX_BYTES} bytes"
+                    )
+        return json.loads(buf.decode("utf-8"))
 
     # ------------------------------------------------------------------
     # Streamable HTTP transport (MCP spec 2025-03-26)
