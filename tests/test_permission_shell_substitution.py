@@ -21,6 +21,7 @@ in the classifier. ``echo $(rm -rf x)`` was already refused; these were not.
 
 import pytest
 
+from agent.permission import policy as policy_module
 from agent.permission.policy import (
     READ_ONLY,
     WORKSPACE_WRITE,
@@ -123,28 +124,30 @@ def test_unbalanced_substitution_does_not_crash_the_gate():
 # deliberately adds ``tempfile.gettempdir()`` to every writable set, and
 # ``tests/conftest.py`` points ``HOME``/``USERPROFILE`` at a directory inside
 # it, so both ``tmp_path`` and ``Path.home()`` sit under temp and there is no
-# "outside" to escape to. The fixture below anchors on the filesystem root
-# instead, which no writable set can cover.
+# "outside" to escape to. The fixture below redirects the trusted temp root
+# instead, which keeps it writable for an unprivileged user on any platform.
 
 
 @pytest.fixture
-def area():
+def area(monkeypatch, tmp_path):
     """A workspace with a sibling directory outside it, outside temp."""
-    import shutil
     import tempfile
-    from pathlib import Path
 
-    anchor = Path(tempfile.gettempdir()).anchor
-    base = Path(anchor) / "cow_permission_test_area"
-    shutil.rmtree(base, ignore_errors=True)
+    # Redirect the trusted root instead of moving the workspace: an earlier
+    # version anchored on the filesystem root, which is not writable for an
+    # unprivileged user on Linux CI.
+    fake_temp = tmp_path / "trusted"
+    fake_temp.mkdir()
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(fake_temp))
+
+    base = tmp_path / "area"
     root = base / "ws"
     (root / "sub").mkdir(parents=True)
     (base / "outside").mkdir()
-    # Guard the premise: if temp covered the base, every case below would pass
-    # for the wrong reason.
-    assert tempfile.gettempdir() not in str(base)
+    # Guard the premise: if temp still covered the base, every case below would
+    # pass for the wrong reason.
+    assert policy_module.tempfile.gettempdir() not in str(base)
     yield base, root
-    shutil.rmtree(base, ignore_errors=True)
 
 
 @pytest.mark.parametrize(
