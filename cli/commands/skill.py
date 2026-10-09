@@ -433,17 +433,11 @@ def _register_installed_skill(name: str, source: str = "cowhub", display_name: s
 
 def _parse_skill_frontmatter(content: str) -> dict:
     """Parse YAML frontmatter from SKILL.md content and return a dict with name/description."""
-    result = {}
-    match = re.match(r'^---\s*\n(.*?)\n---\s*\n', content, re.DOTALL)
-    if not match:
-        return result
-    for line in match.group(1).split('\n'):
-        line = line.strip()
-        for key in ('name', 'description'):
-            if line.startswith(f'{key}:'):
-                val = line[len(key) + 1:].strip()
-                result[key] = val.strip('"').strip("'")
-    return result
+    from agent.skills.frontmatter import parse_frontmatter
+
+    frontmatter = parse_frontmatter(content)
+    return {key: frontmatter[key] for key in ('name', 'description')
+            if isinstance(frontmatter.get(key), str)}
 
 
 def _read_skill_description(skill_dir: str) -> str:
@@ -823,7 +817,7 @@ def _print_skill_table(entries):
     for e, label in zip(entries, labels):
         enabled = e.get("enabled", True)
         source = e.get("source", "")
-        desc = e.get("description", "") or ""
+        desc = " ".join((e.get("description", "") or "").split())
         if len(desc) > desc_w:
             desc = desc[:desc_w - 3] + "..."
 
