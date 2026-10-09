@@ -479,11 +479,13 @@ class MemoryStorage:
         self._schedule_maintenance(repair_pending)
 
     def _migrate_legacy_fts_triggers(self) -> bool:
-        """Replace legacy external-content triggers and flag their indexes.
+        """Drop external-content triggers that cannot read the previous row text.
 
-        AFTER DELETE/UPDATE cannot read the previous text from ``chunks``.
-        Use old-column delete commands, then refill any already-stale index
-        through the existing background maintenance lifecycle.
+        AFTER DELETE/UPDATE triggers must feed FTS5 the old column values, so the
+        old shapes are dropped here and recreated by ``_create_*_objects``. Only
+        the original trigram UPDATE trigger flags a rebuild; other stale entries
+        are left to the integrity scan, which rebuilds an index it finds damaged.
+        Returns True when a rebuild was flagged.
         """
         legacy = []
         for trigger, table, operation in (
@@ -497,28 +499,12 @@ class MemoryStorage:
                 (trigger,),
             ).fetchone()
             if row and row[0] and f"{operation} {table}".upper() in " ".join(row[0].upper().split()):
-                legacy.append((trigger, table))
-        if not legacy:
+                legacy.append(trigger)
+        for trigger in legacy:
+            self.conn.execute(f"DROP TRIGGER {trigger}")
+        if "chunks_trigram_au" not in legacy:
             return False
-
-        # Keep trigger replacement and rebuild flags together if an upgrade
-        # fails; a savepoint also works inside the caller's transaction.
-        self.conn.execute("SAVEPOINT fts_trigger_upgrade")
-        try:
-            for trigger, table in legacy:
-                self.conn.execute(f"DROP TRIGGER {trigger}")
-                if table == "chunks_fts":
-                    self.conn.execute(
-                        "INSERT OR REPLACE INTO _meta(key, value) VALUES(?, '1')",
-                        (_FTS_REBUILD_PENDING,),
-                    )
-                else:
-                    self.conn.execute("DELETE FROM _meta WHERE key = ?", (_TRIGRAM_DONE,))
-            self.conn.execute("RELEASE fts_trigger_upgrade")
-        except Exception:
-            self.conn.execute("ROLLBACK TO fts_trigger_upgrade")
-            self.conn.execute("RELEASE fts_trigger_upgrade")
-            raise
+        self.conn.execute("DELETE FROM _meta WHERE key = ?", (_TRIGRAM_DONE,))
         return True
 
     @staticmethod

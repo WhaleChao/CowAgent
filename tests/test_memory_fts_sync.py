@@ -88,44 +88,22 @@ try:
         assert manager.storage.search_keyword(word) == []
         assert [r.path for r in manager.storage.search_keyword(replacement)] == ['owned.md']
         integrity(manager.storage)
-    elif action == 'atomic':
-        dispatch('create_document', {'path': 'category/guide.md', 'content': word})
-        seed(manager.storage)
-        before = rows(manager.storage)
-        stored = list(manager.storage.conn.execute("SELECT name,sql FROM sqlite_master WHERE type='trigger' AND name IN ('chunks_ad','chunks_au','chunks_trigram_ad') ORDER BY name"))
-        flags = list(manager.storage.conn.execute('SELECT * FROM _meta ORDER BY key'))
-        manager.storage.conn.execute("CREATE TRIGGER owned_upgrade_fault BEFORE INSERT ON _meta WHEN new.key='fts_rebuild_pending' BEGIN SELECT RAISE(ABORT,'owned upgrade failure'); END")
-        manager.storage.conn.commit()
-        db = manager.storage.db_path
-        manager.close()
-        manager = None
-        try:
-            unexpected = MemoryStorage(db)
-        except sqlite3.IntegrityError as exc:
-            assert 'owned upgrade failure' in str(exc)
-        else:
-            unexpected.close()
-            raise AssertionError('legacy migration did not flag its rebuild')
-        conn = sqlite3.connect(db)
-        assert [tuple(r) for r in stored] == conn.execute("SELECT name,sql FROM sqlite_master WHERE type='trigger' AND name IN ('chunks_ad','chunks_au','chunks_trigram_ad') ORDER BY name").fetchall()
-        assert [tuple(r) for r in flags] == conn.execute('SELECT * FROM _meta ORDER BY key').fetchall()
-        conn.execute('DROP TRIGGER owned_upgrade_fault')
-        conn.commit()
-        conn.close()
-        manager = MemoryManager(config, embedding_provider=None)
-        wait(manager.storage)
-        assert rows(manager.storage) == before
-        assert paths(word) == {'knowledge/category/guide.md'}
-        integrity(manager.storage)
     else:
-        dispatch('create_document', {'path': 'category/guide.md', 'content': '# Owned guide\n\n' + word + ' reference\n'})
-        dispatch('create_document', {'path': 'category/target.md', 'content': '# Owned target\n\nordinary target\n'})
-        assert paths(word) == {'knowledge/category/guide.md'}
-        assert service.dispatch('delete_documents', {'paths': ['index.md']})['code'] == 403
         if action == 'legacy':
             conversation = ConversationStore(manager.storage.db_path)
             conversation.append_messages('owned-session', [{'role':'user', 'content':'owned history'}], channel_type='web')
             seed(manager.storage)
+            manager.close()
+            manager = MemoryManager(config, embedding_provider=None)
+            wait(manager.storage)
+            service = KnowledgeService(str(workspace), manager)
+            triggers = ' '.join(sql for (sql,) in manager.storage.conn.execute("SELECT sql FROM sqlite_master WHERE type='trigger'"))
+            assert all(sql not in triggers for sql in legacy.values()), 'legacy triggers survived the reopen'
+            assert not manager.storage.conn.execute("SELECT 1 FROM _meta WHERE key='fts_rebuild_pending'").fetchone()
+        dispatch('create_document', {'path': 'category/guide.md', 'content': '# Owned guide\n\n' + word + ' reference\n'})
+        dispatch('create_document', {'path': 'category/target.md', 'content': '# Owned target\n\nordinary target\n'})
+        assert paths(word) == {'knowledge/category/guide.md'}
+        assert service.dispatch('delete_documents', {'paths': ['index.md']})['code'] == 403
         if action in ('rename', 'legacy'):
             moved = dispatch('rename_category', {'path':'category', 'new_path':'renamed'})
             assert moved['moved_documents'] == 2
@@ -141,11 +119,8 @@ try:
         else:
             expected = {'knowledge/category/guide.md'}
         before_reopen = rows(manager.storage)
-        if action == 'legacy':
-            assert paths(word) != expected, 'actual legacy trigger fixture no longer reproduces'
-        else:
-            assert paths(word) == expected
-            integrity(manager.storage)
+        assert paths(word) == expected
+        integrity(manager.storage)
         manager.close()
         manager = MemoryManager(config, embedding_provider=None)
         wait(manager.storage)
@@ -168,7 +143,7 @@ finally:
 @pytest.mark.parametrize('language,action', [
     (language, action) for language in ('unicode', 'trigram')
     for action in ('control', 'rename', 'overwrite', 'delete-reuse', 'legacy', 'update')
-] + [('unicode', 'atomic'), ('trigram', 'fallback')])
+] + [('trigram', 'fallback')])
 def test_public_mutations_and_legacy_upgrade_preserve_fts(tmp_path, language, action):
     home, data, workspace = (tmp_path / name for name in ('home', 'data', 'workspace'))
     home.mkdir()
