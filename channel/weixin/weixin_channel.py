@@ -747,6 +747,17 @@ class WeixinChannel(ChatChannel):
 
         if wx_msg.ctype == ContextType.FILE:
             wx_msg.prepare()
+            # _download_media swallows its own failure and returns "", leaving
+            # content pointing at the path it would have written. Caching that
+            # hands the agent a file reference that does not exist, and the
+            # next turn's prompt tells it to read one.
+            if not wx_msg.content or not os.path.exists(wx_msg.content):
+                logger.warning(
+                    "[Weixin] File download did not land, not caching: %s",
+                    wx_msg.content,
+                )
+                self._clear_pending_media(session_id)
+                return
             file_cache.add(session_id, wx_msg.content, file_type="file")
             logger.info(f"[Weixin] File cached for session {session_id}: {wx_msg.content}")
             self._clear_pending_media(session_id)
