@@ -24,17 +24,13 @@ function applyTheme() {
 }
 
 // Mermaid bakes the theme colors into the rendered SVG, so a theme switch
-// must re-render every finished diagram. Flip the done markers back to
-// pending, un-hide the code blocks (a slow re-render then shows source
-// rather than a stale diagram) and let renderMermaidBlocks() pick them up.
-// No-op at boot, where nothing has been rendered yet.
+// re-renders diagrams the user already previewed. Never-previewed blocks are
+// left alone, so this never triggers the mermaid download by itself.
 function rerenderMermaidDiagrams() {
     document.querySelectorAll('.mermaid-block[data-mermaid="done"]').forEach(block => {
         block.dataset.mermaid = 'pending';
         const figure = block.querySelector('.mermaid-figure');
         if (figure) figure.remove();
-        const pre = block.querySelector('pre');
-        if (pre) pre.classList.remove('hidden');
     });
     if (document.querySelector('.mermaid-block[data-mermaid="pending"]')) {
         renderMermaidBlocks(document);

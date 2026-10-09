@@ -165,8 +165,7 @@ function applyHighlighting(container) {
         });
         // Add language labels and copy buttons to code blocks
         _addCodeBlockHeaders(root);
-        // Upgrade ```mermaid placeholders (emitted by the fence rule in
-        // markdown.js) to rendered diagrams.
+        // Add the [Code|Preview] switch to ```mermaid blocks (no download here).
         renderMermaidBlocks(root);
     }, 0);
 }

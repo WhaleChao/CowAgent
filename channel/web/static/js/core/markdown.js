@@ -128,12 +128,8 @@ function createMd() {
     md.renderer.rules.table_close = function(tokens, idx, options, env, self) {
         return defaultTableClose(tokens, idx, options, env, self) + '</div>';
     };
-    // A ```mermaid fence is not highlighted as code: it becomes a placeholder
-    // that renderMermaidBlocks() upgrades to a real diagram once the DOM is in
-    // place (see applyHighlighting). Streaming-safe by construction: while the
-    // fence is still open mermaid rejects the incomplete source and the block
-    // simply stays a plain code block, so nothing flickers until the syntax
-    // completes.
+    // A ```mermaid fence stays a code block with a [Code|Preview] switch;
+    // mermaid itself is only downloaded when the user clicks Preview.
     const defaultFence = md.renderer.rules.fence;
     md.renderer.rules.fence = function(tokens, idx, options, env, self) {
         const token = tokens[idx];
@@ -146,7 +142,7 @@ function createMd() {
         // The source stays in a real <pre><code> so the usual code-block
         // header (with its copy button) still wraps it, and so the diagram
         // can be re-rendered from source on a theme switch.
-        return '<div class="mermaid-block" data-mermaid="pending">' +
+        return '<div class="mermaid-block" data-mermaid="idle" data-mermaid-mode="code">' +
             '<pre><code class="language-mermaid">' + escapeHtml(token.content) + '</code></pre>' +
             '</div>';
     };
@@ -326,10 +322,8 @@ const MERMAID_SRI_HASH = 'sha384-EOXBFmc3gx5mb+vn0vPvvGqACToJD24hhacX5Yx+8NUUQrH
 let _mermaidLoadPromise = null;
 
 function ensureMermaidLoaded() {
-    // Lazily inject the IIFE build (~3.5MB) on the first ```mermaid block:
-    // a conversation without diagrams never pays for it. Same pattern as
-    // ensureD3Loaded(). The integrity hash pins the exact bytes of
-    // mermaid@11.17.2; SRI needs CORS, hence crossOrigin.
+    // Injected only on the first Preview click, so page loads never fetch the
+    // ~3.5MB build. The integrity hash pins mermaid@11.17.2; SRI needs CORS.
     if (window.mermaid) return Promise.resolve(window.mermaid);
     if (_mermaidLoadPromise) return _mermaidLoadPromise;
     _mermaidLoadPromise = new Promise((resolve, reject) => {
@@ -340,8 +334,7 @@ function ensureMermaidLoaded() {
         script.async = true;
         script.onload = () => resolve(window.mermaid);
         script.onerror = () => {
-            // Clear the memo so a transient failure can be retried on the
-            // next applyHighlighting pass.
+            // Clear the memo so the next Preview click can retry.
             _mermaidLoadPromise = null;
             reject(new Error('Failed to load mermaid'));
         };
@@ -380,94 +373,114 @@ function _renderMermaidBlock(mermaid, block) {
         if (!block.isConnected || block.dataset.mermaid !== 'rendering') return;
         if (_mermaidThemeName() !== theme) {
             block.dataset.mermaid = 'pending';
-            renderMermaidBlocks(block.parentElement);
+            _loadAndRenderMermaid([block]);
             return;
         }
         const figure = document.createElement('div');
         figure.className = 'mermaid-figure';
         figure.innerHTML = svg;
+        // The source <pre> stays: code view and theme re-renders read it.
         pre.parentNode.insertBefore(figure, pre);
-        // Keep the (hidden) source: the copy button in code view reads it,
-        // and a theme switch re-renders the diagram from it.
-        pre.classList.add('hidden');
-        _installMermaidToolbar(block);
         block.dataset.mermaid = 'done';
+        _syncMermaidToolbar(block);
+        const savedZoom = parseFloat(block.dataset.mermaidZoomLevel || '1');
+        if (savedZoom !== 1) _setMermaidZoom(block, savedZoom);
     }).catch(() => {
-        // Invalid or still-incomplete syntax (normal while a diagram streams
-        // in): leave the plain code block, header and copy button included.
-        if (block.isConnected && block.dataset.mermaid === 'rendering') {
-            block.dataset.mermaid = 'invalid';
-        }
+        if (block.dataset.mermaid === 'rendering') _markMermaidInvalid(block);
     });
 }
 
+function _markMermaidInvalid(block) {
+    // Invalid syntax or a failed CDN load: fall back to the code view.
+    if (!block.isConnected) return;
+    block.dataset.mermaid = 'invalid';
+    block.dataset.mermaidMode = 'code';
+    _syncMermaidToolbar(block);
+}
+
+function _loadAndRenderMermaid(blocks) {
+    ensureMermaidLoaded().then((mermaid) => {
+        blocks.forEach(block => {
+            // Skip nodes a re-render swapped out while the script was loading.
+            if (!block.isConnected || block.dataset.mermaid !== 'pending') return;
+            block.dataset.mermaid = 'rendering';
+            _renderMermaidBlock(mermaid, block);
+        });
+    }).catch(() => blocks.forEach(_markMermaidInvalid));
+}
+
+function _previewMermaidBlock(block) {
+    block.dataset.mermaidMode = 'chart';
+    const state = block.dataset.mermaid;
+    if (state === 'idle' || state === 'invalid') block.dataset.mermaid = 'pending';
+    _syncMermaidToolbar(block);
+    if (block.dataset.mermaid === 'pending') _loadAndRenderMermaid([block]);
+}
+
 // ---------------------------------------------------------------------
-// Mermaid Diagram View: chart/code toggle, zoom, fullscreen
+// Mermaid Diagram View: [Code|Preview] switch, zoom, fullscreen
 //
-// A rendered diagram gets the DeepSeek-style header controls (#3221
-// review): a [Chart|Code] toggle plus zoom and fullscreen tools on the
-// chart side. Chart is the default; the source <pre> always stays in the
-// DOM, so code view always has something to show and copy.
+// Code is the default view. Zoom and fullscreen only show once a diagram
+// has rendered in preview.
 // ---------------------------------------------------------------------
 const MERMAID_ZOOM_MIN = 0.4;
 const MERMAID_ZOOM_MAX = 3;
 
 function _installMermaidToolbar(block) {
     const header = block.querySelector('.code-block-header');
-    if (!header) return;
-    // Chart is the default view; the marker lives on the block, which
-    // survives a theme re-render, so the user's choice is kept across one.
-    if (!block.dataset.mermaidMode) block.dataset.mermaidMode = 'chart';
-
-    if (!header.querySelector('.mermaid-toolbar')) {
-        const toolbar = document.createElement('div');
-        toolbar.className = 'mermaid-toolbar';
-        toolbar.innerHTML =
-            '<button class="mermaid-mode-btn" data-mermaid-view="chart" title="Chart view">' +
-                '<i class="fas fa-diagram-project"></i></button>' +
-            '<button class="mermaid-mode-btn" data-mermaid-view="code" title="Code view">' +
-                '<i class="fas fa-code"></i></button>' +
-            '<span class="mermaid-chart-tools">' +
-                '<button class="mermaid-tool-btn" data-mermaid-zoom="in" title="Zoom in">' +
-                    '<i class="fas fa-magnifying-glass-plus"></i></button>' +
-                '<button class="mermaid-tool-btn" data-mermaid-zoom="out" title="Zoom out">' +
-                    '<i class="fas fa-magnifying-glass-minus"></i></button>' +
-                '<button class="mermaid-tool-btn" data-mermaid-zoom="reset" title="Reset zoom">' +
-                    '<i class="fas fa-arrows-rotate"></i></button>' +
-                '<button class="mermaid-tool-btn mermaid-fullscreen-btn" title="Fullscreen">' +
-                    '<i class="fas fa-expand"></i></button>' +
-            '</span>';
-        header.insertBefore(toolbar, header.querySelector('.code-copy-btn'));
-        toolbar.addEventListener('click', (e) => {
-            const modeBtn = e.target.closest('[data-mermaid-view]');
-            if (modeBtn) {
-                block.dataset.mermaidMode = modeBtn.dataset.mermaidView;
+    if (!header || header.querySelector('.mermaid-toolbar')) return;
+    const toolbar = document.createElement('div');
+    toolbar.className = 'mermaid-toolbar';
+    toolbar.innerHTML =
+        '<button class="mermaid-mode-btn" data-mermaid-view="code">' + t('mermaid_code') + '</button>' +
+        '<button class="mermaid-mode-btn" data-mermaid-view="chart">' +
+            '<i class="fas fa-spinner fa-spin mermaid-spinner"></i>' + t('mermaid_preview') + '</button>' +
+        '<span class="mermaid-chart-tools">' +
+            '<button class="mermaid-tool-btn" data-mermaid-zoom="in" title="Zoom in">' +
+                '<i class="fas fa-magnifying-glass-plus"></i></button>' +
+            '<button class="mermaid-tool-btn" data-mermaid-zoom="out" title="Zoom out">' +
+                '<i class="fas fa-magnifying-glass-minus"></i></button>' +
+            '<button class="mermaid-tool-btn" data-mermaid-zoom="reset" title="Reset zoom">' +
+                '<i class="fas fa-arrows-rotate"></i></button>' +
+            '<button class="mermaid-tool-btn mermaid-fullscreen-btn" title="Fullscreen">' +
+                '<i class="fas fa-expand"></i></button>' +
+        '</span>';
+    header.insertBefore(toolbar, header.querySelector('.code-copy-btn'));
+    toolbar.addEventListener('click', (e) => {
+        const modeBtn = e.target.closest('[data-mermaid-view]');
+        if (modeBtn) {
+            if (modeBtn.dataset.mermaidView === 'chart') {
+                _previewMermaidBlock(block);
+            } else {
+                block.dataset.mermaidMode = 'code';
                 _syncMermaidToolbar(block);
-                return;
             }
-            const zoomBtn = e.target.closest('[data-mermaid-zoom]');
-            if (zoomBtn) {
-                const current = parseFloat(block.dataset.mermaidZoomLevel || '1');
-                const action = zoomBtn.dataset.mermaidZoom;
-                _setMermaidZoom(block, action === 'in' ? current * 1.25
-                    : action === 'out' ? current / 1.25 : 1);
-                return;
-            }
-            if (e.target.closest('.mermaid-fullscreen-btn')) _toggleMermaidFullscreen(block);
-        });
-    }
+            return;
+        }
+        const zoomBtn = e.target.closest('[data-mermaid-zoom]');
+        if (zoomBtn) {
+            const current = parseFloat(block.dataset.mermaidZoomLevel || '1');
+            const action = zoomBtn.dataset.mermaidZoom;
+            _setMermaidZoom(block, action === 'in' ? current * 1.25
+                : action === 'out' ? current / 1.25 : 1);
+            return;
+        }
+        if (e.target.closest('.mermaid-fullscreen-btn')) _toggleMermaidFullscreen(block);
+    });
     _syncMermaidToolbar(block);
-    // A theme re-render swaps in a fresh SVG: re-apply the saved zoom to it.
-    const savedZoom = parseFloat(block.dataset.mermaidZoomLevel || '1');
-    if (savedZoom !== 1) _setMermaidZoom(block, savedZoom);
 }
 
 function _syncMermaidToolbar(block) {
-    const mode = block.dataset.mermaidMode || 'chart';
-    block.dataset.mermaidMode = mode;
+    const mode = block.dataset.mermaidMode || 'code';
+    const state = block.dataset.mermaid;
     block.querySelectorAll('.mermaid-mode-btn').forEach(btn => {
         btn.classList.toggle('active', btn.dataset.mermaidView === mode);
     });
+    const preview = block.querySelector('.mermaid-mode-btn[data-mermaid-view="chart"]');
+    if (!preview) return;
+    preview.classList.toggle('loading', state === 'pending' || state === 'rendering');
+    preview.classList.toggle('failed', state === 'invalid');
+    preview.title = state === 'invalid' ? t('mermaid_preview_failed') : '';
 }
 
 // Zoom resizes the SVG by width (percent), not transform: the figure keeps
@@ -528,28 +541,14 @@ function _syncMermaidFullscreenIcons() {
 }
 document.addEventListener('fullscreenchange', _syncMermaidFullscreenIcons);
 
-// Upgrade the ```mermaid placeholders emitted by the fence rule to real
-// diagrams. Idempotent: only 'pending' blocks are picked up, each moving
-// through 'rendering' to 'done' (or 'invalid' when mermaid rejects the
-// source), so repeated applyHighlighting passes never re-render a finished
-// diagram. Called with the bubble/container; document covers everything.
+// Called after every markdown render. Only adds the [Code|Preview] switch;
+// it never loads mermaid. Blocks become 'pending' through a Preview click
+// (or a theme switch re-rendering a finished diagram), move through
+// 'rendering' to 'done', or to 'invalid' when the source or the load fails.
 function renderMermaidBlocks(container) {
     const root = container || document;
-    const blocks = root.querySelectorAll('.mermaid-block[data-mermaid="pending"]');
-    if (blocks.length === 0) return;
-    ensureMermaidLoaded().then((mermaid) => {
-        blocks.forEach(block => {
-            // Skip nodes a re-render swapped out while the script was loading.
-            if (!block.isConnected || block.dataset.mermaid !== 'pending') return;
-            block.dataset.mermaid = 'rendering';
-            _renderMermaidBlock(mermaid, block);
-        });
-    }).catch(() => {
-        // CDN unreachable (offline / firewalled console): fall back to plain
-        // code blocks instead of placeholders that never upgrade.
-        blocks.forEach(block => {
-            if (block.isConnected) block.dataset.mermaid = 'invalid';
-        });
-    });
+    root.querySelectorAll('.mermaid-block').forEach(_installMermaidToolbar);
+    const pending = root.querySelectorAll('.mermaid-block[data-mermaid="pending"]');
+    if (pending.length) _loadAndRenderMermaid(Array.from(pending));
 }
 

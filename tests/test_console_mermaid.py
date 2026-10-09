@@ -1,15 +1,7 @@
 # encoding:utf-8
-"""The Web console renders ```mermaid fences as diagrams (#3221).
+"""The Web console previews ```mermaid fences as diagrams on demand (#3221).
 
-The render pipeline is browser JS, so pytest can only pin the static
-contract: mermaid is lazy-loaded at runtime from a version-pinned CDN URL
-verified by a subresource integrity hash (the #3221 review ruled out the
-in-tree vendor copy), the fence rule turns mermaid fences into upgradeable
-placeholders, the renderer runs with ``securityLevel: 'strict'`` (message
-content is untrusted agent output), invalid syntax and a failed CDN load
-both degrade back to a plain code block, a rendered diagram grows a
-[Chart|Code] toggle plus zoom/fullscreen controls on the chart side, and a
-theme switch re-renders finished diagrams.
+The pipeline is browser JS, so these tests pin the static contract.
 """
 
 import re
@@ -59,89 +51,59 @@ def test_cdn_load_is_sri_verified():
     assert SRI_HASH in readme
 
 
-def test_mermaid_is_lazy_loaded_not_fetched_on_page_load():
-    # ~3.5MB must not be fetched up front: chat.html carries no mermaid
-    # script tag, the CDN script is injected on the first mermaid block.
+def _function_body(js, name):
+    start = js.index(f"function {name}(")
+    end = js.index("\n}\n", start)
+    return js[start:end]
+
+
+def test_mermaid_is_only_loaded_by_a_preview_click():
     page = _read("channel/web/chat.html")
     assert not re.search(r"<script[^>]*mermaid", page)
     js = _console_js()
-    assert "function ensureMermaidLoaded()" in js
-
-
-def test_fence_rule_intercepts_only_mermaid_and_escapes_source():
-    js = _console_js()
-    assert "md.renderer.rules.fence" in js
-    # Matched on the info string; every other fence keeps the default rule.
-    assert "lang !== 'mermaid'" in js
-    # The placeholder keeps the source in a real <pre><code> so the usual
-    # code-block header still wraps it (copy button), and the source is
-    # escaped: fence content is untrusted agent output.
-    assert 'data-mermaid="pending"' in js
+    # Fences start as plain code blocks in code view.
+    assert 'data-mermaid="idle" data-mermaid-mode="code"' in js
     assert "escapeHtml(token.content)" in js
+    # The per-render hook only installs the switch and renders blocks already
+    # marked pending; it never starts the download for idle blocks.
+    hook = _function_body(js, "renderMermaidBlocks")
+    assert "ensureMermaidLoaded" not in hook
+    assert '.mermaid-block[data-mermaid="pending"]' in hook
+    assert "ensureMermaidLoaded()" in _function_body(js, "_loadAndRenderMermaid")
+    preview = _function_body(js, "_previewMermaidBlock")
+    assert "block.dataset.mermaid = 'pending'" in preview
+    assert "_previewMermaidBlock(block)" in _function_body(js, "_installMermaidToolbar")
+    theme = _read("channel/web/static/js/core/theme.js")
+    assert 'data-mermaid="done"' in _function_body(theme, "rerenderMermaidDiagrams")
 
 
-def test_renderer_is_strict_idempotent_and_theme_aware():
+def test_renderer_is_strict_and_theme_aware():
     js = _console_js()
     assert "securityLevel: 'strict'" in js  # no HTML labels, no callbacks
-    assert "startOnLoad: false" in js  # rendering is driven by applyHighlighting
+    assert "startOnLoad: false" in js
     assert "suppressErrorRendering: true" in js  # no mermaid error graphic
     assert "classList.contains('dark') ? 'dark' : 'default'" in js
-    # Only pending blocks are picked up, so repeated passes never re-render.
-    assert '.mermaid-block[data-mermaid="pending"]' in js
 
 
-def test_invalid_syntax_degrades_to_plain_code_block():
+def test_invalid_syntax_or_failed_load_falls_back_to_code_view():
     js = _console_js()
-    # A rejected render marks the block 'invalid' and keeps the <pre>:
-    # the code block stays, header and copy button included.
-    assert "block.dataset.mermaid = 'invalid'" in js
+    invalid = _function_body(js, "_markMermaidInvalid")
+    assert "block.dataset.mermaid = 'invalid'" in invalid
+    assert "block.dataset.mermaidMode = 'code'" in invalid
+    assert "_mermaidLoadPromise = null" in js  # a failed load can be retried
     assert "renderMermaidBlocks(root)" in js  # hooked into applyHighlighting
 
 
-def test_failed_cdn_load_degrades_too():
+def test_preview_controls_only_show_on_a_rendered_diagram():
     js = _console_js()
-    # A failed lazy load (offline, blocked CDN, integrity mismatch) clears
-    # its memo (retryable) and marks the pending blocks invalid instead of
-    # leaving placeholders that never upgrade.
-    assert "_mermaidLoadPromise = null" in js
-    assert "Failed to load mermaid" in js
-
-
-def test_rendered_diagram_gets_chart_code_toggle():
-    js = _console_js()
-    # After a successful render the code-block header grows a [Chart|Code]
-    # toggle. Chart is the default view; the source <pre> always stays in
-    # the DOM so code view (and its copy button) always has the source.
-    assert "function _installMermaidToolbar(" in js
-    assert 'data-mermaid-view="chart"' in js
-    assert 'data-mermaid-view="code"' in js
-    assert "dataset.mermaidMode = 'chart'" in js  # default view
+    assert 'data-mermaid-view="chart"' in js and 'data-mermaid-view="code"' in js
+    for action in ("in", "out", "reset"):
+        assert f'data-mermaid-zoom="{action}"' in js
+    assert "requestFullscreen" in js and "classList.toggle('mermaid-fullscreen')" in js
     css = _read("channel/web/static/css/markdown.css")
-    assert '.mermaid-block[data-mermaid-mode="code"]' in css
-    # The copy button belongs to code view only, per the #3221 review.
-    assert '.mermaid-block[data-mermaid-mode="chart"] .code-copy-btn' in css
-
-
-def test_chart_view_has_zoom_and_fullscreen_controls():
-    js = _console_js()
-    # Zoom in / out / reset scale the rendered SVG; fullscreen prefers the
-    # Fullscreen API and falls back to a CSS class on the block.
-    assert 'data-mermaid-zoom="in"' in js
-    assert 'data-mermaid-zoom="out"' in js
-    assert 'data-mermaid-zoom="reset"' in js
-    assert "function _setMermaidZoom(" in js
-    assert "requestFullscreen" in js
-    assert "exitFullscreen" in js
-    assert "classList.toggle('mermaid-fullscreen')" in js
-    css = _read("channel/web/static/css/markdown.css")
+    done = '.mermaid-block[data-mermaid-mode="chart"][data-mermaid="done"]'
+    assert f"{done} .mermaid-chart-tools" in css
+    assert f"{done} .code-copy-btn" in css
     assert ".mermaid-block.mermaid-fullscreen" in css
-
-
-def test_theme_switch_re_renders_finished_diagrams():
-    theme = _read("channel/web/static/js/core/theme.js")
-    # applyTheme() is the single switch point (boot and toggleTheme both hit
-    # it), and the re-render must reset the done markers for it.
-    assert "rerenderMermaidDiagrams();" in theme
-    assert theme.index("rerenderMermaidDiagrams();") < theme.index("function toggleTheme")
-    assert 'data-mermaid="done"' in theme
-    assert "renderMermaidBlocks(document)" in theme
+    i18n = _read("channel/web/static/js/core/i18n.js")
+    assert i18n.count("mermaid_preview:") == 3

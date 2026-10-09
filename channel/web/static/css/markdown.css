@@ -443,8 +443,9 @@
 
 /* =====================================================================
    Mermaid Diagrams
-   Before rendering (and on invalid syntax) a mermaid block is just the
-   code-block-wrapper above; only the rendered figure gets diagram styling.
+   A mermaid block is a normal code block plus a [Code|Preview] switch in
+   its header. The diagram, zoom and fullscreen only appear once a preview
+   has rendered (data-mermaid="done").
    ===================================================================== */
 .mermaid-block .mermaid-figure {
     display: flex;
@@ -459,13 +460,12 @@
     height: auto;
 }
 
-/* --- Header toolbar: [Chart|Code] view toggle + zoom/fullscreen tools ---
-   Installed once a diagram renders; the zoom/fullscreen tools only make
-   sense on the chart side and follow its visibility below. */
 .mermaid-toolbar {
     display: flex;
     align-items: center;
     gap: 0.25em;
+    margin-left: auto; /* sit next to the copy button, not centered in the header */
+    margin-right: 0.25em;
 }
 
 .mermaid-mode-btn,
@@ -491,6 +491,10 @@
     color: #334155;
 }
 
+.mermaid-mode-btn.failed {
+    color: #dc2626;
+}
+
 .dark .mermaid-mode-btn,
 .dark .mermaid-tool-btn {
     color: #94a3b8;
@@ -507,32 +511,31 @@
     color: #e2e8f0;
 }
 
-/* --- Chart/code switch ------------------------------------------------
-   The current view is a data attribute on .mermaid-block (chart is the
-   default, set when the toolbar is installed). Both views read from the
-   same source: code view shows the ever-present <pre> with its copy
-   button, chart view shows the diagram. */
-.mermaid-block[data-mermaid-mode="chart"] .mermaid-figure {
-    display: flex;
+.dark .mermaid-mode-btn.failed {
+    color: #f87171;
 }
 
-.mermaid-block[data-mermaid-mode="chart"] .code-block-wrapper pre {
+.mermaid-spinner {
     display: none;
+    margin-right: 0.35em;
 }
 
-.mermaid-block[data-mermaid-mode="chart"] .code-copy-btn {
-    display: none;
+.mermaid-mode-btn.loading .mermaid-spinner {
+    display: inline-block;
 }
 
+/* --- Code/preview switch ---------------------------------------------- */
+.mermaid-chart-tools,
 .mermaid-block[data-mermaid-mode="code"] .mermaid-figure {
     display: none;
 }
 
-.mermaid-block[data-mermaid-mode="code"] .code-block-wrapper pre {
-    display: block; /* wins over tailwind's .hidden on the rendered source */
+.mermaid-block[data-mermaid-mode="chart"][data-mermaid="done"] .mermaid-chart-tools {
+    display: inline-flex;
 }
 
-.mermaid-block[data-mermaid-mode="code"] .mermaid-chart-tools {
+.mermaid-block[data-mermaid-mode="chart"][data-mermaid="done"] .code-block-wrapper pre,
+.mermaid-block[data-mermaid-mode="chart"][data-mermaid="done"] .code-copy-btn {
     display: none;
 }
 

@@ -50,13 +50,13 @@ Notes:
   engine). It must be served as JS to keep the existing `tailwind.config = {}`
   customization working.
 - `mermaid.min.js` is the IIFE build (attaches `window.mermaid`; the ESM
-  build would need an import map). MIT licensed. It is injected on demand by
-  `ensureMermaidLoaded()` in `static/js/core/markdown.js` when a message
-  actually contains a ` ```mermaid ` fence, so pages without diagrams never
+  build would need an import map). MIT licensed. Mermaid fences show as code
+  by default; `ensureMermaidLoaded()` in `static/js/core/markdown.js` injects
+  the script only when the user clicks Preview on one, so page loads never
   download the ~3.5MB. It always renders with `securityLevel: 'strict'`
   because message content is untrusted agent output. A failed load (offline,
-  blocked CDN, integrity mismatch) degrades to a plain code block and is
-  retried on the next render pass.
+  blocked CDN, integrity mismatch) falls back to the code view and is retried
+  on the next Preview click.
 - One external script remains, in `channel/web/static/js/views/channels-wecom.js`:
   `wwcdn.weixin.qq.com/.../wecom-aibot-sdk` — Tencent requires the WeCom Bot
   SDK to be loaded from their CDN, and it is only fetched when the user opens
