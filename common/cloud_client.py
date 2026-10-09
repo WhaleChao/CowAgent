@@ -769,9 +769,8 @@ class CloudClient(LinkAIClient):
         from channel.channel_instances import remove_instance
         enabled = data.get("enabled", "Y")
         if enabled == "N":
+            # Disabling keeps the login so re-enabling does not need a new QR scan.
             remove_instance(conf(), instance_id)
-            if channel_type in ("weixin", "wx"):
-                self._remove_weixin_credentials(instance_id)
             if self.channel_mgr:
                 threading.Thread(
                     target=self._do_remove_channel, args=(instance_id,), daemon=True
@@ -983,11 +982,7 @@ class CloudClient(LinkAIClient):
     def _remove_weixin_credentials(instance_id: str = ""):
         """Remove the weixin token credentials file so next connect triggers QR login.
 
-        Credentials are isolated per instance (``weixin_credentials.{instance_id}.json``)
-        so several Weixin accounts in one process never overwrite one file. When an
-        instance is deleted its file must go too: a token left on disk silently
-        re-logs the next instance that reuses the id into the old account. ``instance_id=""``
-        keeps clearing the legacy single-login path.
+        ``instance_id`` selects that instance's own file; empty means the legacy path.
         """
         cred_path = get_weixin_credentials_path(instance_id)
         try:

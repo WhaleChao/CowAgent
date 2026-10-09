@@ -1,15 +1,5 @@
 # encoding: utf-8
-"""Deleting a Weixin instance/channel must clear its per-instance token file.
-
-Weixin credentials are stored per instance (``weixin_credentials.{instance_id}.json``)
-so several accounts in one process never overwrite one file. The cloud control
-plane removes instances through three paths -- ``instance_delete``,
-``instance_update`` with ``enabled=N``, and ``channel_sync``. Until the fix none
-of them removed the per-instance credential file, so deleting and re-adding an
-instance silently re-logged it into the old account from the token left on disk.
-``_remove_weixin_credentials`` now takes the instance id and the deletion paths
-pass it through.
-"""
+"""Deleting a Weixin instance clears its per-instance token file; disabling keeps it."""
 
 import sys
 import types
@@ -100,7 +90,7 @@ def test_handle_instance_delete_clears_weixin_credentials(tmp_path):
     assert not inst_file.exists()
 
 
-def test_handle_instance_update_disabled_clears_weixin_credentials(tmp_path):
+def test_handle_instance_update_disabled_keeps_weixin_credentials(tmp_path):
     inst_file = tmp_path / "weixin_credentials.abc.json"
     inst_file.write_text("{}")
     client = _client()
@@ -110,7 +100,7 @@ def test_handle_instance_update_disabled_clears_weixin_credentials(tmp_path):
                          side_effect=_path_resolver(tmp_path)):
         client._handle_instance_update("abc", "weixin", {"enabled": "N"})
 
-    assert not inst_file.exists()
+    assert inst_file.exists()
 
 
 def test_handle_instance_delete_skips_non_weixin(tmp_path):
