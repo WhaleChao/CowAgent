@@ -299,6 +299,21 @@ def _scan_skills_in_dir(directory: str) -> list:
     return found
 
 
+def _check_skill_copy_paths(source_dir: str, target_dir: str) -> None:
+    """Refuse copies that would delete their source or recurse into themselves."""
+    source = os.path.normcase(os.path.realpath(source_dir))
+    target = os.path.normcase(os.path.realpath(target_dir))
+    try:
+        common = os.path.commonpath((source, target))
+    except ValueError:
+        # Paths on different Windows drives cannot overlap.
+        return
+    if common in (source, target):
+        raise SkillInstallError(
+            "Skill source and destination overlap; use a separate source directory."
+        )
+
+
 def _batch_install_skills(discovered, spec, skills_dir, source, result: InstallResult, display_name: str = "", agent_id: str = None):
     """Install a list of discovered skills into skills_dir."""
     single = len(discovered) == 1
@@ -309,6 +324,7 @@ def _batch_install_skills(discovered, spec, skills_dir, source, result: InstallR
             result.messages.append(f"  Skipping '{sname}' (invalid name)")
             continue
         target_dir = os.path.join(skills_dir, safe_name)
+        _check_skill_copy_paths(sdir, target_dir)
         if os.path.exists(target_dir):
             shutil.rmtree(target_dir)
         shutil.copytree(sdir, target_dir)
@@ -346,6 +362,7 @@ def _install_local(path: str, result: InstallResult, agent_id: str = None):
         skill_name = re.sub(r'[^a-zA-Z0-9_\-]', '-', skill_name)[:64]
         _check_skill_name(skill_name)
         target_dir = os.path.join(skills_dir, skill_name)
+        _check_skill_copy_paths(path, target_dir)
         if os.path.exists(target_dir):
             shutil.rmtree(target_dir)
         shutil.copytree(path, target_dir)
