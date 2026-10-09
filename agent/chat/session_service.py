@@ -328,17 +328,38 @@ class SessionService:
         except Exception as e:
             logger.warning(f"[SessionService] Cancel on delete failed: {e}")
 
-    def delete_session(self, session_id: str, agent_id: str = None) -> None:
+    def delete_session(self, session_id: str, agent_id: str = None,
+                       fanout: bool = True) -> None:
         if not session_id:
             raise ValueError("session_id required")
         session_id = self._normalize_sid(session_id)
+        # Read the roster first: forgetting the side stores drops it.
+        teammates = self._teammates(session_id, agent_id) if fanout else []
 
         self._cancel_running(session_id, agent_id)
         store = self._get_store(agent_id)
         store.clear_session(session_id)
         self._forget_side_stores(session_id, agent_id)
         self._remove_agent(session_id, agent_id)
+        # A team conversation keeps one transcript per participant.
+        self.delete_teammate_copies(session_id, teammates)
         logger.info(f"[SessionService] Session deleted: {session_id}")
+
+    def delete_teammate_copies(self, session_id: str, teammates) -> None:
+        """Drop each teammate's local copy of a deleted session, best-effort.
+
+        A peer in another process is out of reach here.
+        """
+        for member_id in teammates:
+            try:
+                self.delete_session(session_id, agent_id=member_id, fanout=False)
+            except Exception as e:
+                logger.warning(
+                    f"[SessionService] Delete failed for agent '{member_id}': {e}")
+
+    def team_members(self, session_id: str, agent_id: str = None) -> list:
+        """Everyone else holding a transcript of this session."""
+        return self._teammates(session_id, agent_id)
 
     def _forget_side_stores(self, session_id: str, agent_id: str = None) -> None:
         """Drop the session's project binding and prefs, each best-effort."""
