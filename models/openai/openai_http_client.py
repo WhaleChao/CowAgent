@@ -22,8 +22,10 @@ Design goals:
   override and trusting whatever path/payload shape the caller passes.
 """
 
+import hashlib
 import json
 import os
+import uuid
 from typing import Any, Dict, Generator, Optional
 from urllib.parse import urlparse
 
@@ -90,6 +92,67 @@ def _resolve_attribution_headers(url: str) -> Dict[str, str]:
                     )
             return resolved
     return {}
+
+
+# Gateways that require a stable per-conversation session id for routing and
+# prompt caching, and reject requests without it. The value is a hash of the
+# ambient session, so raw chat / user ids never leave the process.
+_SESSION_HEADER_BY_HOST: Dict[str, str] = {
+    "opencode.ai": "x-opencode-session",
+}
+
+# Used when a request runs outside any conversation (e.g. a background job).
+_PROCESS_SESSION_ID = uuid.uuid4().hex
+
+
+def _host_of(url: str) -> str:
+    try:
+        return (urlparse(url).hostname or "").lower()
+    except Exception:
+        return ""
+
+
+def _host_matches(host: str, suffix: str) -> bool:
+    return host == suffix or host.endswith("." + suffix)
+
+
+def _session_token() -> str:
+    try:
+        from common.runtime_identity import current_identity
+        identity = current_identity()
+    except Exception:
+        return _PROCESS_SESSION_ID
+    if not identity.session_id:
+        return _PROCESS_SESSION_ID
+    scope = f"{identity.agent_id or ''}:{identity.session_id}"
+    return hashlib.sha256(scope.encode("utf-8")).hexdigest()[:32]
+
+
+def _user_agent() -> str:
+    try:
+        from cli import __version__
+    except Exception:
+        return _APP_TITLE
+    return f"{_APP_TITLE}/{__version__}"
+
+
+def _resolve_session_headers(url: str) -> Dict[str, str]:
+    host = _host_of(url)
+    if not host:
+        return {}
+    for suffix, header in _SESSION_HEADER_BY_HOST.items():
+        if _host_matches(host, suffix):
+            # These gateways also ask clients to identify themselves instead
+            # of sending a generic HTTP-library user agent.
+            return {header: _session_token(), "User-Agent": _user_agent()}
+    return {}
+
+
+def resolve_host_headers(url: str) -> Dict[str, str]:
+    """Headers a known gateway expects for ``url``; {} for any other host."""
+    headers = _resolve_attribution_headers(url)
+    headers.update(_resolve_session_headers(url))
+    return headers
 
 
 class OpenAIHTTPError(Exception):
@@ -263,9 +326,7 @@ class OpenAIHTTPClient:
         if key:
             headers["Authorization"] = f"Bearer {key}"
         if url:
-            attribution = _resolve_attribution_headers(url)
-            if attribution:
-                headers.update(attribution)
+            headers.update(resolve_host_headers(url))
         if self.extra_headers:
             headers.update(self.extra_headers)
         if extra_headers:

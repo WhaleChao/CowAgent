@@ -16,7 +16,7 @@ from common import const
 from common.i18n import t as _t
 from models.bot import Bot
 from models.openai_compatible_bot import OpenAICompatibleBot
-from models.custom_provider import resolve_custom_credentials, parse_custom_bot_type
+from models.custom_provider import resolve_custom_credentials, resolve_custom_headers, parse_custom_bot_type
 from models.chatgpt.chat_gpt_session import ChatGPTSession
 from models.openai.open_ai_image import OpenAIImage
 from models.session_manager import SessionManager
@@ -42,10 +42,12 @@ class ChatGPTBot(Bot, OpenAIImage, OpenAICompatibleBot):
         self._bot_type = bot_type or conf().get("bot_type", "")
         is_custom, _ = parse_custom_bot_type(self._bot_type)
         custom_model = None
+        extra_headers = None
         if is_custom:
             # Supports multiple custom providers via bot_type "custom:<id>"
             # with automatic fallback to the legacy custom_api_key/base fields.
             self._api_key, self._api_base, custom_model = resolve_custom_credentials(self._bot_type)
+            extra_headers = resolve_custom_headers(self._bot_type)
         else:
             self._api_key = conf().get("open_ai_api_key")
             self._api_base = conf().get("open_ai_api_base") or None
@@ -54,6 +56,7 @@ class ChatGPTBot(Bot, OpenAIImage, OpenAICompatibleBot):
             api_key=self._api_key,
             api_base=self._api_base,
             proxy=self._proxy,
+            extra_headers=extra_headers,
         )
         if conf().get("rate_limit_chatgpt"):
             self.tb4chatgpt = TokenBucket(conf().get("rate_limit_chatgpt", 20))
