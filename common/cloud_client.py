@@ -770,6 +770,8 @@ class CloudClient(LinkAIClient):
         enabled = data.get("enabled", "Y")
         if enabled == "N":
             remove_instance(conf(), instance_id)
+            if channel_type in ("weixin", "wx"):
+                self._remove_weixin_credentials(instance_id)
             if self.channel_mgr:
                 threading.Thread(
                     target=self._do_remove_channel, args=(instance_id,), daemon=True
@@ -829,6 +831,8 @@ class CloudClient(LinkAIClient):
                 continue
             remove_instance(conf(), instance_id)
             removed += 1
+            if channel_type in ("weixin", "wx"):
+                self._remove_weixin_credentials(instance_id)
             if self.channel_mgr:
                 threading.Thread(
                     target=self._do_remove_channel, args=(instance_id,), daemon=True
@@ -842,6 +846,8 @@ class CloudClient(LinkAIClient):
     def _handle_instance_delete(self, instance_id: str, channel_type: str, data: dict):
         from channel.channel_instances import remove_instance
         remove_instance(conf(), instance_id)
+        if channel_type in ("weixin", "wx"):
+            self._remove_weixin_credentials(instance_id)
         if self.channel_mgr:
             threading.Thread(
                 target=self._do_remove_channel, args=(instance_id,), daemon=True
@@ -974,9 +980,16 @@ class CloudClient(LinkAIClient):
             ).start()
 
     @staticmethod
-    def _remove_weixin_credentials():
-        """Remove the weixin token credentials file so next connect triggers QR login."""
-        cred_path = get_weixin_credentials_path()
+    def _remove_weixin_credentials(instance_id: str = ""):
+        """Remove the weixin token credentials file so next connect triggers QR login.
+
+        Credentials are isolated per instance (``weixin_credentials.{instance_id}.json``)
+        so several Weixin accounts in one process never overwrite one file. When an
+        instance is deleted its file must go too: a token left on disk silently
+        re-logs the next instance that reuses the id into the old account. ``instance_id=""``
+        keeps clearing the legacy single-login path.
+        """
+        cred_path = get_weixin_credentials_path(instance_id)
         try:
             if os.path.exists(cred_path):
                 os.remove(cred_path)
