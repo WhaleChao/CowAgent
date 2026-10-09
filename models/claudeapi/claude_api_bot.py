@@ -2,6 +2,8 @@
 
 import json
 import re
+import socket
+import threading
 import time
 from typing import Optional
 
@@ -65,6 +67,92 @@ CACHE_CONTROL = {"type": "ephemeral"}
 CACHE_TTL_1H = "1h"
 MAX_CACHE_BREAKPOINTS = 4
 UNCACHEABLE_BLOCK_TYPES = ("thinking", "redacted_thinking")
+
+# Without it the API buffers a tool argument until the whole value is complete,
+# so a large `write` streams nothing but a ping every 30s for minutes, and
+# networks that drop quiet connections throw the whole generation away.
+EAGER_INPUT_STREAMING = "eager_input_streaming"
+
+# With thinking summaries and eager tool input, a healthy stream is never quiet
+# for long. Some connections go silent mid-generation yet stay open for half an
+# hour, outliving the socket read timeout, so a stream with no event for this
+# long is cut and retried.
+STREAM_STALL_SECONDS = 90
+
+
+# While thinking the API may send nothing at all, so a long think looks exactly
+# like a dead connection, and some networks cut it at that point. Thinking less
+# is what makes the retry finish.
+_LOWER_EFFORT = {"max": "medium", "xhigh": "medium", "high": "medium", "medium": "low"}
+_MIN_THINKING_BUDGET = 1024
+
+
+def _lower_thinking(params: dict) -> Optional[dict]:
+    """Return params asking for less thinking, or None when it cannot go lower."""
+    thinking = params.get("thinking") or {}
+    if thinking.get("type") == "enabled":
+        budget = thinking.get("budget_tokens") or 0
+        if budget <= _MIN_THINKING_BUDGET:
+            return None
+        return dict(params, thinking=dict(thinking, budget_tokens=max(_MIN_THINKING_BUDGET, budget // 2)))
+    if not thinking:
+        return None
+    output_config = params.get("output_config") or {}
+    lower = _LOWER_EFFORT.get(output_config.get("effort") or "high")
+    if not lower:
+        return None
+    return dict(params, output_config=dict(output_config, effort=lower))
+
+
+def _abort_response(response) -> None:
+    """Unblock a reader stuck in recv() on this response's socket."""
+    raw = getattr(response, "raw", None)
+    getters = (
+        lambda: raw._fp.fp.raw._sock,
+        lambda: raw._connection.sock,
+        lambda: raw.connection.sock,
+    )
+    for get_sock in getters:
+        try:
+            sock = get_sock()
+        except Exception:
+            continue
+        if sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            break
+    try:
+        response.close()
+    except Exception:
+        pass
+
+
+class _StallWatchdog:
+    """Cuts a streaming response that has received no event for ``limit`` seconds."""
+
+    def __init__(self, response, limit: Optional[float] = None):
+        self.response = response
+        self.limit = STREAM_STALL_SECONDS if limit is None else limit
+        self.interval = min(5.0, self.limit / 3)
+        self.tripped = False
+        self._last = time.monotonic()
+        self._stop = threading.Event()
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def beat(self) -> None:
+        self._last = time.monotonic()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def _run(self) -> None:
+        while not self._stop.wait(self.interval):
+            if time.monotonic() - self._last > self.limit:
+                self.tripped = True
+                _abort_response(self.response)
+                return
 
 
 # OpenAI对话模型API (可用)
@@ -419,6 +507,9 @@ class ClaudeAPIBot(Bot, OpenAIImage):
             request_params["system"] = system_prompt
 
         if tools:
+            if stream:
+                tools = [dict(t, **{EAGER_INPUT_STREAMING: True}) if isinstance(t, dict) and "input_schema" in t else t
+                         for t in tools]
             request_params["tools"] = tools
             # Agent turns resend the same long prefix on every step of the tool
             # loop, so cache it; one-off calls without tools are left alone.
@@ -442,6 +533,11 @@ class ClaudeAPIBot(Bot, OpenAIImage):
         )
         if thinking_params:
             request_params["thinking"] = thinking_params
+        elif stream and (actual_model or "").lower().startswith(ADAPTIVE_THINKING_MODELS):
+            # These models think even when the field is omitted, but then stream
+            # nothing until the thinking ends; summaries keep the connection busy
+            # so networks that cut idle streams do not drop the request.
+            request_params["thinking"] = {"type": "adaptive", "display": "summarized"}
 
         try:
             if stream:
@@ -660,6 +756,33 @@ class ClaudeAPIBot(Bot, OpenAIImage):
         return formatted_response
 
     def _handle_stream_response(self, request_params):
+        """Stream a response; if it stalls while the model is still thinking, retry with less effort.
+
+        A request that stalls during silent thinking stalls again when resent
+        unchanged, so the agent-level retry alone would fail the same way.
+        """
+        while True:
+            visible = False
+            stalled_chunk = None
+            for chunk in self._stream_once(request_params):
+                if chunk.get("error") and chunk.get("stalled") and not visible:
+                    stalled_chunk = chunk
+                    break
+                delta = ((chunk.get("choices") or [{}])[0] or {}).get("delta") or {}
+                if delta.get("content") or delta.get("tool_calls"):
+                    visible = True
+                yield chunk
+            if stalled_chunk is None:
+                return
+            lowered = _lower_thinking(request_params)
+            if lowered is None:
+                yield stalled_chunk
+                return
+            logger.warning(f"[Claude] Stream went silent while thinking; retrying with "
+                           f"{lowered.get('output_config', {}).get('effort') or lowered.get('thinking')}")
+            request_params = lowered
+
+    def _stream_once(self, request_params):
         """Handle streaming Claude API response using HTTP requests"""
         # Prepare headers
         headers = {
@@ -682,6 +805,7 @@ class ClaudeAPIBot(Bot, OpenAIImage):
         usage_output_tokens = 0
         usage_cache_write = 0
         usage_cache_read = 0
+        watchdog = None
 
         try:
             # Make streaming HTTP request
@@ -694,6 +818,22 @@ class ClaudeAPIBot(Bot, OpenAIImage):
                 stream=True,
                 timeout=180
             )
+
+            if response.status_code == 400 and EAGER_INPUT_STREAMING in response.text:
+                # Some Anthropic-compatible gateways reject the field; drop it and resend.
+                logger.warning("[Claude] Endpoint rejected eager_input_streaming, retrying without it")
+                request_params["tools"] = [
+                    {k: v for k, v in t.items() if k != EAGER_INPUT_STREAMING} if isinstance(t, dict) else t
+                    for t in request_params.get("tools") or []
+                ]
+                response = requests.post(
+                    f"{self.api_base}/messages",
+                    headers=headers,
+                    json=request_params,
+                    proxies=proxies,
+                    stream=True,
+                    timeout=180
+                )
 
             if response.status_code != 200:
                 error_text = response.text
@@ -711,10 +851,12 @@ class ClaudeAPIBot(Bot, OpenAIImage):
                 return
 
             # Process streaming response
+            watchdog = _StallWatchdog(response)
             for line in response.iter_lines():
                 if line:
                     line = line.decode('utf-8')
                     if line.startswith('data: '):
+                        watchdog.beat()
                         line = line[6:]  # Remove 'data: ' prefix
                         if line == '[DONE]':
                             break
@@ -839,17 +981,29 @@ class ClaudeAPIBot(Bot, OpenAIImage):
                         except json.JSONDecodeError:
                             continue
 
-        except requests.RequestException as e:
-            logger.error(f"Claude streaming request error: {e}")
-            yield {
-                "error": True,
-                "message": f"Connection error: {str(e)}",
-                "status_code": 0
-            }
+            if watchdog.tripped:
+                raise requests.ConnectionError("stream ended after the stall watchdog fired")
+
         except Exception as e:
-            logger.error(f"Claude streaming error: {e}")
+            stalled = watchdog is not None and watchdog.tripped
+            if stalled:
+                message = f"Connection error: stream stalled (no data for {STREAM_STALL_SECONDS}s), aborted for retry"
+                logger.error(f"Claude {message}")
+                status_code = 0
+            elif isinstance(e, requests.RequestException):
+                logger.error(f"Claude streaming request error: {e}")
+                message = f"Connection error: {str(e)}"
+                status_code = 0
+            else:
+                logger.error(f"Claude streaming error: {e}")
+                message = str(e)
+                status_code = 500
             yield {
                 "error": True,
-                "message": str(e),
-                "status_code": 500
+                "message": message,
+                "status_code": status_code,
+                "stalled": stalled,
             }
+        finally:
+            if watchdog is not None:
+                watchdog.stop()
