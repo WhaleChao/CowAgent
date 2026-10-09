@@ -224,7 +224,7 @@ def _download_github_dir(owner, repo, branch, subpath, dest_dir):
         elif item["type"] == "dir":
             os.makedirs(local_path, exist_ok=True)
             child_subpath = item["path"]
-            _download_github_dir(owner, repo, branch, child_subpath, dest_dir)
+            _download_github_dir(owner, repo, branch, child_subpath, local_path)
 
 
 # Directories to search for skills following the Agent Skills convention
