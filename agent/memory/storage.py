@@ -439,14 +439,14 @@ class MemoryStorage:
                     (_FTS_REBUILD_PENDING,),
                 )
                 repair_pending = True
+            if self._migrate_legacy_fts_triggers():
+                repair_pending = True
             self._create_fts5_objects(self.conn)
 
         # Create trigram FTS5 table for CJK / mixed-language search
         self.trigram_fts5_available = False
         if self.fts5_available:
             try:
-                if self._migrate_legacy_trigram_update_trigger():
-                    repair_pending = True
                 self._create_trigram_objects(self.conn)
                 self.trigram_fts5_available = True
                 # An empty chunks table has nothing to backfill; its trigram
@@ -478,33 +478,32 @@ class MemoryStorage:
         self.conn.commit()
         self._schedule_maintenance(repair_pending)
 
-    def _migrate_legacy_trigram_update_trigger(self) -> bool:
-        """Replace the legacy chunks_trigram_au trigger if present.
+    def _migrate_legacy_fts_triggers(self) -> bool:
+        """Drop external-content triggers that cannot read the previous row text.
 
-        Older versions synced updates with a bare
-        "UPDATE chunks_fts_trigram SET ...", which corrupts the external-content
-        trigram index on chunk updates. We detect that shape via the stored
-        trigger SQL, drop it (dropping a trigger touches no data), and flag a
-        trigram rebuild so any already-damaged index is repaired in the
-        background. Returns True when the rebuild was flagged.
+        AFTER DELETE/UPDATE triggers must feed FTS5 the old column values, so the
+        old shapes are dropped here and recreated by ``_create_*_objects``. Only
+        the original trigram UPDATE trigger flags a rebuild; other stale entries
+        are left to the integrity scan, which rebuilds an index it finds damaged.
+        Returns True when a rebuild was flagged.
         """
-        try:
+        legacy = []
+        for trigger, table, operation in (
+            ("chunks_ad", "chunks_fts", "DELETE FROM"),
+            ("chunks_au", "chunks_fts", "UPDATE"),
+            ("chunks_trigram_ad", "chunks_fts_trigram", "DELETE FROM"),
+            ("chunks_trigram_au", "chunks_fts_trigram", "UPDATE"),
+        ):
             row = self.conn.execute(
-                "SELECT sql FROM sqlite_master WHERE type='trigger' "
-                "AND name='chunks_trigram_au'"
+                "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?",
+                (trigger,),
             ).fetchone()
-        except Exception:
+            if row and row[0] and f"{operation} {table}".upper() in " ".join(row[0].upper().split()):
+                legacy.append(trigger)
+        for trigger in legacy:
+            self.conn.execute(f"DROP TRIGGER {trigger}")
+        if "chunks_trigram_au" not in legacy:
             return False
-        if not row or not row[0]:
-            return False
-        if "UPDATE chunks_fts_trigram" not in row[0]:
-            return False
-        from common.log import logger
-        logger.warning(
-            "[MemoryStorage] Replacing legacy chunks_trigram_au trigger; "
-            "rebuilding the trigram index in the background."
-        )
-        self.conn.execute("DROP TRIGGER IF EXISTS chunks_trigram_au")
         self.conn.execute("DELETE FROM _meta WHERE key = ?", (_TRIGRAM_DONE,))
         return True
 
@@ -558,15 +557,16 @@ class MemoryStorage:
         """)
         conn.execute("""
             CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN
-                DELETE FROM chunks_fts WHERE rowid = old.rowid;
+                INSERT INTO chunks_fts(chunks_fts, rowid, text, id, user_id, path, source, scope)
+                VALUES ('delete', old.rowid, old.text, old.id, old.user_id, old.path, old.source, old.scope);
             END
         """)
         conn.execute("""
             CREATE TRIGGER IF NOT EXISTS chunks_au AFTER UPDATE ON chunks BEGIN
-                UPDATE chunks_fts SET text = new.text, id = new.id,
-                                     user_id = new.user_id, path = new.path,
-                                     source = new.source, scope = new.scope
-                WHERE rowid = new.rowid;
+                INSERT INTO chunks_fts(chunks_fts, rowid, text, id, user_id, path, source, scope)
+                VALUES ('delete', old.rowid, old.text, old.id, old.user_id, old.path, old.source, old.scope);
+                INSERT INTO chunks_fts(rowid, text, id, user_id, path, source, scope)
+                VALUES (new.rowid, new.text, new.id, new.user_id, new.path, new.source, new.scope);
             END
         """)
 
@@ -603,7 +603,8 @@ class MemoryStorage:
         conn.execute("""
             CREATE TRIGGER IF NOT EXISTS chunks_trigram_ad
             AFTER DELETE ON chunks BEGIN
-                DELETE FROM chunks_fts_trigram WHERE rowid = old.rowid;
+                INSERT INTO chunks_fts_trigram(chunks_fts_trigram, rowid, text, id, user_id, path, source, scope)
+                VALUES ('delete', old.rowid, old.text, old.id, old.user_id, old.path, old.source, old.scope);
             END
         """)
         # External-content FTS5 requires the delete+insert pattern on

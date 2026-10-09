@@ -31,6 +31,7 @@ change needs no migration.
 from __future__ import annotations
 
 import os
+import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -247,6 +248,11 @@ def tmp_dir(identity=None, ensure: bool = True, base=None) -> Path:
     to the user; revisit when tenancy lands rather than guessing now.
     """
     return _ensure(_agent_base(identity, base) / "tmp", ensure)
+
+
+def tmp_file(prefix: str, ext: str = "") -> str:
+    """A unique path in ``tmp_dir()`` for one transient media file."""
+    return os.path.join(str(tmp_dir()), f"{prefix}_{uuid.uuid4().hex[:8]}{ext}")
 
 
 # --- User-scoped: isolated per end user once tenancy lands -------------------

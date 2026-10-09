@@ -366,6 +366,9 @@ class WechatKfChannel(ChatChannel):
                 ftype = "image" if kf_msg.ctype == ContextType.IMAGE else "file"
                 try:
                     kf_msg.prepare()  # download to local tmp path
+                    # prepare() swallows a failed download; never hand the agent a missing path.
+                    if not kf_msg.content or not os.path.exists(kf_msg.content):
+                        raise FileNotFoundError(kf_msg.content or "<empty path>")
                     file_cache.add(session_id, kf_msg.content, file_type=ftype)
                     logger.info(
                         "[wechat_kf] {} cached for session {}: {}".format(

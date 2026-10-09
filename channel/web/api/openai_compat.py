@@ -28,6 +28,9 @@ _SESSION_LOCKS = tuple(threading.Lock() for _ in range(64))
 _STREAM_END = object()
 _STREAM_ERROR = object()
 _FIRST_EVENT_TIMEOUT_SECONDS = 30
+# Budget for each later stream event, matching the web SSE stream. Without it
+# a stalled run parks the consumer forever and keeps the session lock.
+_STREAM_IDLE_TIMEOUT_SECONDS = 600
 
 
 def _authenticate(authorization: str, external_api_token: str) -> None:
@@ -314,6 +317,7 @@ def _stream_completion(
             yield _sse_frame(
                 _base_chunk(completion_id, created, model, {"role": "assistant"})
             )
+            timed_out = False
             while item is not _STREAM_END:
                 if item is _STREAM_ERROR:
                     finish_reason = "error"
@@ -331,8 +335,30 @@ def _stream_completion(
                     )
                 else:
                     yield _sse_frame(item)
-                item = output.get()
-            completed = True
+                try:
+                    item = output.get(timeout=_STREAM_IDLE_TIMEOUT_SECONDS)
+                except queue.Empty:
+                    # The worker stalled. completed stays False so the finally below cancels
+                    # the run and releases the session lock.
+                    timed_out = True
+                    finish_reason = "error"
+                    yield _sse_frame(
+                        _base_chunk(
+                            completion_id,
+                            created,
+                            model,
+                            {},
+                            cow_event={
+                                "type": "error",
+                                "message": (
+                                    "CowAgent stopped producing events before the "
+                                    "stream finished."
+                                ),
+                            },
+                        )
+                    )
+                    break
+            completed = not timed_out
             yield _sse_frame(
                 _base_chunk(
                     completion_id,

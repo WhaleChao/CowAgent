@@ -17,6 +17,8 @@ from typing import NamedTuple
 
 import requests
 
+from common.log import logger
+
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
 MAX_FILE_BYTES = 100 * 1024 * 1024
 
@@ -81,6 +83,18 @@ def save_response(response, path, max_bytes=MAX_FILE_BYTES, max_seconds=None) ->
                 os.remove(temp_path)
             except OSError:
                 pass
+
+
+def remove_download(path) -> None:
+    """Delete a downloaded temp file. No-op for an empty or missing path; other errors are logged."""
+    if not path:
+        return
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        logger.warning(f"[media] temp cleanup failed for {path}: {e}")
 
 
 def read_response(response, max_bytes=MAX_FILE_BYTES, max_seconds=None) -> bytes:

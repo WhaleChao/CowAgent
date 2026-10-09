@@ -584,6 +584,29 @@ def _group_into_display_turns(
     return turns
 
 
+# Ceiling for a page requested from outside (HTTP or a remote caller).
+MAX_PAGE_SIZE = 200
+
+
+def page_window(page: Any, page_size: Any, default_page_size: int,
+                 cap: Optional[int] = MAX_PAGE_SIZE) -> tuple:
+    """Clamp an untrusted (page, page_size) pair into a usable window.
+
+    A negative page_size would reach SQLite as LIMIT -1 ("no limit") and 0
+    would divide by zero; ``cap=None`` keeps only those lower bounds.
+    """
+    try:
+        page = int(page)
+    except (TypeError, ValueError):
+        page = 1
+    try:
+        page_size = int(page_size)
+    except (TypeError, ValueError):
+        page_size = default_page_size
+    page_size = max(1, page_size)
+    return max(1, page), min(page_size, cap) if cap else page_size
+
+
 class ConversationStore:
     """
     SQLite-backed store for per-session conversation history.
@@ -1696,6 +1719,8 @@ class ConversationStore:
         Pages are numbered from 1 (most recent).  Messages within a page are
         returned in chronological order.
 
+        ``page`` and ``page_size`` are clamped to ``[1, MAX_PAGE_SIZE]``.
+
         Returns:
             {
                 "messages": [
@@ -1713,7 +1738,7 @@ class ConversationStore:
                 "has_more": bool,
             }
         """
-        page = max(1, page)
+        page, page_size = page_window(page, page_size, 20)
         with self._lock:
             conn = self._connect()
             try:
@@ -1868,6 +1893,9 @@ class ConversationStore:
         the rows on the same page, so a pin still reaches the top of the list
         when the conversation is old enough to sit several pages down.
 
+        ``page`` and ``page_size`` are only bounded below: the cross-Agent
+        listing asks each store for ``page * page_size`` rows at once.
+
         Returns:
             {
                 "sessions": [{session_id, title, created_at, last_active,
@@ -1878,7 +1906,7 @@ class ConversationStore:
                 "has_more": bool,
             }
         """
-        page = max(1, page)
+        page, page_size = page_window(page, page_size, 50, cap=None)
         with self._lock:
             conn = self._connect()
             try:
@@ -1946,6 +1974,38 @@ class ConversationStore:
                         (title, self._agent_id, session_id),
                     )
                     return cur.rowcount > 0
+            finally:
+                conn.close()
+
+    def upsert_title(self, session_id: str, title: str, channel_type: str = "") -> bool:
+        """Set a session's title, creating its record first when missing.
+
+        A client may title a brand-new chat before the agent has persisted its
+        first turn; a plain rename would hit no row and lose the title. The
+        record created here is the same one ``append_messages`` would create,
+        so the later write just fills it in. Returns True if the row existed.
+        """
+        now = int(time.time())
+        with self._lock:
+            conn = self._connect()
+            try:
+                with conn:
+                    aid = self._agent_id
+                    inserted = conn.execute(
+                        """
+                        INSERT OR IGNORE INTO sessions
+                            (agent_id, session_id, channel_type, title, created_at, last_active, msg_count)
+                        VALUES (?, ?, ?, ?, ?, ?, 0)
+                        """,
+                        (aid, session_id, channel_type, title, now, now),
+                    ).rowcount
+                    if inserted:
+                        return False
+                    conn.execute(
+                        "UPDATE sessions SET title = ? WHERE agent_id = ? AND session_id = ?",
+                        (title, aid, session_id),
+                    )
+                    return True
             finally:
                 conn.close()
 

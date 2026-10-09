@@ -652,6 +652,9 @@ const I18N = {
         update_step_restart: '重启服务',
         update_step_starting: '准备更新',
         update_step_done: '完成',
+        mermaid_code: '代码',
+        mermaid_preview: '预览',
+        mermaid_preview_failed: '图表无法渲染',
     },
     'zh-Hant': {
 
@@ -1296,6 +1299,9 @@ const I18N = {
         update_step_restart: '重啟服務',
         update_step_starting: '準備更新',
         update_step_done: '完成',
+        mermaid_code: '程式碼',
+        mermaid_preview: '預覽',
+        mermaid_preview_failed: '圖表無法渲染',
         },
     en: {
         console: 'Console',
@@ -1943,6 +1949,9 @@ const I18N = {
         update_step_restart: 'Restarting the service',
         update_step_starting: 'Preparing the update',
         update_step_done: 'Done',
+        mermaid_code: 'Code',
+        mermaid_preview: 'Preview',
+        mermaid_preview_failed: 'Diagram could not be rendered',
     }
 };
 

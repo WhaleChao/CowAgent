@@ -133,8 +133,7 @@ class WeixinMessage(ChatMessage):
 
             def _download():
                 path = self._download_media(item, ITEM_VIDEO, cdn_base_url)
-                if path:
-                    self.content = path
+                self.content = path or ""
             self._prepare_fn = _download
 
         elif media_type == ITEM_FILE:
@@ -145,8 +144,7 @@ class WeixinMessage(ChatMessage):
 
             def _download():
                 path = self._download_media(item, ITEM_FILE, cdn_base_url)
-                if path:
-                    self.content = path
+                self.content = path or ""
             self._prepare_fn = _download
 
         elif media_type == ITEM_VOICE:
@@ -156,8 +154,7 @@ class WeixinMessage(ChatMessage):
 
             def _download():
                 path = self._download_media(item, ITEM_VOICE, cdn_base_url)
-                if path:
-                    self.content = path
+                self.content = path or ""
             self._prepare_fn = _download
 
     def _download_media(self, item: dict, media_type: int, cdn_base_url: str) -> str:

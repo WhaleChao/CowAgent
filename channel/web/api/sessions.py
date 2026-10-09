@@ -369,8 +369,8 @@ class SessionsHandler:
             params = web.input(
                 page='1', page_size='50', agent_id='', agent='', scope=''
             )
-            page = int(params.page)
-            page_size = int(params.page_size)
+            from agent.memory.conversation_store import page_window
+            page, page_size = page_window(params.page, params.page_size, 50)
             if (params.scope or '').strip() == 'all':
                 result = _list_sessions_across_agents(page, page_size)
                 return json.dumps({"status": "success", **result}, ensure_ascii=False)
@@ -424,6 +424,10 @@ class SessionDetailHandler:
             except Exception as e:
                 logger.warning(f"[WebChannel] Cancel on delete failed: {e}")
 
+            from agent.chat.session_service import SessionService
+            sessions = SessionService()
+            teammates = sessions.team_members(session_id, agent_id)
+
             from agent.memory import get_conversation_store
             store = get_conversation_store(_get_workspace_root(agent_id=agent_id))
             store.clear_session(session_id)
@@ -448,6 +452,7 @@ class SessionDetailHandler:
                 ab.clear_session(session_id, agent_id=agent_id)
             except Exception:
                 pass
+            sessions.delete_teammate_copies(session_id, teammates)
 
             channel = WebChannel()
             # Drop messages still waiting in the channel queue: processing them
@@ -825,8 +830,8 @@ class SessionTitleHandler:
 
             from agent.memory import get_conversation_store
             store = get_conversation_store(_get_workspace_root(agent_id=agent_id))
-            updated = store.rename_session(session_id, title)
-            logger.info(f"[WebChannel] Session title set: sid={session_id}, title='{title}', db_updated={updated}")
+            existed = store.upsert_title(session_id, title, channel_type="web")
+            logger.info(f"[WebChannel] Session title set: sid={session_id}, title='{title}', existed={existed}")
 
             return json.dumps({"status": "success", "title": title}, ensure_ascii=False)
         except Exception as e:

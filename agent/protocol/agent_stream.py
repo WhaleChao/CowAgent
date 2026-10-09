@@ -1706,7 +1706,17 @@ class AgentStreamExecutor:
                     if finish_reason:
                         stop_reason = finish_reason
 
-                    reasoning_delta = delta.get("reasoning_content") or ""
+                    # Providers name the reasoning field differently.
+                    reasoning_delta = (
+                        delta.get("reasoning_content")
+                        or delta.get("reasoning")
+                        or delta.get("thinking")
+                        or ""
+                    )
+                    if isinstance(reasoning_delta, list):
+                        _, reasoning_delta = self._split_content_blocks(reasoning_delta)
+                    if not isinstance(reasoning_delta, str):
+                        reasoning_delta = ""
                     if reasoning_delta:
                         full_reasoning += reasoning_delta
                         if self._is_thinking_enabled():

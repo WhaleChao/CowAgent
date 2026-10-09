@@ -38,6 +38,15 @@ def _is_within_workspace(workspace: Path, candidate: Path) -> bool:
         return False
 
 
+def _discard_incomplete(target: Path) -> None:
+    """Drop a snapshot directory that never got a usable manifest. Never raises."""
+    try:
+        if target.is_dir():
+            shutil.rmtree(target, ignore_errors=True)
+    except OSError as e:  # pragma: no cover - rmtree already swallows most
+        logger.debug(f"[Evolution] Could not remove incomplete backup: {e}")
+
+
 def create_backup(workspace_dir: Path, files: List[Path]) -> Optional[str]:
     """Snapshot ``files`` (those that exist) under a new backup id.
 
@@ -73,6 +82,8 @@ def create_backup(workspace_dir: Path, files: List[Path]) -> Optional[str]:
         return backup_id
     except Exception as e:
         logger.warning(f"[Evolution] Failed to create backup: {e}")
+        # A half-written snapshot must not take one of the _MAX_BACKUPS slots.
+        _discard_incomplete(target)
         return None
 
 
@@ -119,13 +130,22 @@ def restore_backup(workspace_dir: Path, backup_id: str) -> bool:
 
 
 def _prune_old_backups(root: Path) -> None:
-    """Drop the oldest backups beyond _MAX_BACKUPS (sorted by name = chronological)."""
+    """Drop the oldest backups beyond _MAX_BACKUPS (sorted by name = chronological).
+
+    Only restorable snapshots consume a slot. A directory without a manifest
+    cannot be restored, so keeping it would evict a snapshot the user can still
+    undo -- either crash debris or a failure from an older create_backup that
+    predates _discard_incomplete.
+    """
     try:
         dirs = sorted(
             [d for d in root.iterdir() if d.is_dir()],
             key=lambda p: p.name,
         )
-        for old in dirs[:-_MAX_BACKUPS]:
+        complete = [d for d in dirs if (d / _MANIFEST_NAME).is_file()]
+        for debris in [d for d in dirs if d not in complete]:
+            shutil.rmtree(debris, ignore_errors=True)
+        for old in complete[:-_MAX_BACKUPS]:
             shutil.rmtree(old, ignore_errors=True)
     except Exception as e:
         logger.debug(f"[Evolution] Backup prune skipped: {e}")

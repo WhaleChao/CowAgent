@@ -128,8 +128,9 @@ class TaskStore:
                 if os.path.exists(self.store_path):
                     backup_path = f"{self.store_path}.bak"
                     try:
-                        with open(self.store_path, 'r', encoding='utf-8') as src:
-                            previous = src.read()
+                        # A failed recovery can leave the primary corrupt.
+                        # Never replace the usable backup with that primary.
+                        previous, _ = _read_tasks(self.store_path)
                         write_text_atomic(backup_path, previous)
                     except Exception:
                         pass

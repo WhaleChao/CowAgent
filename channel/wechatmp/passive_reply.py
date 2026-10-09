@@ -144,7 +144,11 @@ class Query:
                     # cached text segments at once and merge them into one reply.
                     # Media (voice/image) can only be returned one at a time, so it
                     # stops the merge and is returned on its own.
-                    cached = channel.cache_dict[from_user]
+                    # Use .get: indexing the defaultdict would insert an empty entry that
+                    # blocks this user from starting a new task.
+                    cached = channel.cache_dict.get(from_user)
+                    if not cached:
+                        return "success"
                     if cached[0][0] == "text":
                         reply_type = "text"
                         merged_parts = []
@@ -153,7 +157,7 @@ class Query:
                         reply_content = "\n\n".join(merged_parts)
                     else:
                         (reply_type, reply_content) = cached.pop(0)
-                    if not channel.cache_dict[from_user]:  # If draining empties the list, delete the user entry from cache
+                    if not cached:  # If draining empties the list, delete the user entry from cache
                         del channel.cache_dict[from_user]
                 except IndexError:
                     return "success"

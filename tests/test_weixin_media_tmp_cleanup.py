@@ -42,7 +42,7 @@ def _stub_get(monkeypatch, get):
 @pytest.fixture
 def channel(tmp_path, monkeypatch):
     _stub_get(monkeypatch, lambda url, **kw: _Response())
-    monkeypatch.setattr(wc, "_media_tmp_path",
+    monkeypatch.setattr(wc.state_dir, "tmp_file",
                         lambda prefix, ext="": str(tmp_path / f"{prefix}_{uuid.uuid4().hex[:8]}{ext}"))
     ch = Channel.__new__(Channel)
     ch._sent_text = []
@@ -104,11 +104,3 @@ def test_unresolvable_media_leaves_nothing_behind(channel, tmp_path, monkeypatch
     assert channel._resolve_media("https://example.test/gone.png") == ("", False)
     assert not list(tmp_path.iterdir())
 
-
-def test_helpers_use_managed_tmp_dir_and_tolerate_missing_paths(tmp_path):
-    from common import state_dir
-
-    path = wc._media_tmp_path("wx_media", ".png")
-    assert str(state_dir.tmp_dir()) in path and path.endswith(".png")
-    wc._remove_media_tmp(str(tmp_path / "never-existed.png"))
-    wc._remove_media_tmp("")
