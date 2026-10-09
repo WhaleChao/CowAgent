@@ -226,3 +226,7 @@ def test_the_placeholder_is_not_readable_as_a_command_or_a_path():
     segments = _parse_segments("cat <(echo hi)")
     outer = [segment for segment in segments if segment[0] == "cat"]
     assert outer and all("\x00" not in token for token in outer[0][:1])
+
+@pytest.mark.parametrize("command", ["cat <(rm -rf x ')", "echo `rm x '`"])
+def test_an_unlexable_substitution_fails_closed(command):
+    assert not check_tool_call(READ_ONLY, "bash", {"command": command}).allowed

@@ -359,8 +359,11 @@ def _split_process_substitutions(command: str) -> Tuple[str, List[str]]:
     return "".join(out), bodies
 
 
-def _collect_segments(command: str, segments: List[List[str]]) -> None:
-    """Append the token lists of ``command`` (and of anything it substitutes)."""
+def _collect_segments(command: str, segments: List[List[str]]) -> bool:
+    """Append the token lists of ``command`` and of anything it substitutes.
+
+    Returns False when any part cannot be lexed, so the whole line fails closed.
+    """
     command = _BACKTICK_RE.sub(
         lambda match: f"$({match.group(1).strip()})" if match.group(1).strip() else "",
         command,
@@ -369,14 +372,15 @@ def _collect_segments(command: str, segments: List[List[str]]) -> None:
     # Substituted bodies are separate commands the shell runs; classify them
     # before the outer line so the outer command cannot mask them.
     for body in bodies:
-        _collect_segments(body, segments)
+        if not _collect_segments(body, segments):
+            return False
 
     lexer = shlex.shlex(outer, posix=True, punctuation_chars=True)
     lexer.whitespace_split = True
     try:
         tokens = list(lexer)
     except ValueError:
-        return
+        return False
 
     current: List[str] = []
     for token in tokens:
@@ -388,6 +392,7 @@ def _collect_segments(command: str, segments: List[List[str]]) -> None:
         current.append(token)
     if current:
         segments.append(current)
+    return True
 
 
 def _parse_segments(command: str) -> Optional[List[List[str]]]:
@@ -398,8 +403,7 @@ def _parse_segments(command: str) -> Optional[List[List[str]]]:
     command and not two. Returns None when the line cannot be lexed at all.
     """
     segments: List[List[str]] = []
-    _collect_segments(command or "", segments)
-    if not segments:
+    if not _collect_segments(command or "", segments):
         return None
     return segments
 
