@@ -163,7 +163,7 @@ class KnowledgeService:
             # Return sorted (rel_path, title) tuples for *.md under dir_path,
             # excluding protected files at the knowledge root and dot files.
             entries = []
-            for md in sorted(dir_path.rglob("*.md")):
+            for md in sorted(dir_path.rglob("*.[mM][dD]")):
                 rel = md.relative_to(root).as_posix()
                 if any(part.startswith(".") for part in md.relative_to(root).parts):
                     continue
@@ -382,7 +382,7 @@ class KnowledgeService:
         if new_full.exists():
             raise FileExistsError(f"target already exists: {new_rel}")
         old_documents = [str(p.relative_to(old_full)).replace(os.sep, "/")
-                         for p in old_full.rglob("*.md") if p.is_file()]
+                         for p in old_full.rglob("*.[mM][dD]") if p.is_file()]
         new_full.parent.mkdir(parents=True, exist_ok=True)
         try:
             old_full.rename(new_full)
@@ -403,7 +403,7 @@ class KnowledgeService:
             raise ValueError(f"not a category: {rel_path}")
         knowledge_root = Path(self.knowledge_dir).resolve()
         documents = [str(p.relative_to(knowledge_root)).replace(os.sep, "/")
-                     for p in full_path.rglob("*.md") if p.is_file()]
+                     for p in full_path.rglob("*.[mM][dD]") if p.is_file()]
         if any(p in self.PROTECTED_FILES for p in documents):
             raise ValueError("category contains protected knowledge files")
         if any(full_path.iterdir()) and not confirm:
@@ -549,7 +549,7 @@ class KnowledgeService:
             if os.path.isdir(full):
                 sub_files, sub_children = self._scan_dir(full, stats)
                 children.append({"dir": name, "files": sub_files, "children": sub_children})
-            elif name.endswith(".md"):
+            elif name.lower().endswith(".md"):
                 size = os.path.getsize(full)
                 if not is_root:
                     stats["pages"] += 1
@@ -616,9 +616,9 @@ class KnowledgeService:
         nodes = {}
         links = []
         # Trailing "#anchor" is optional so section links still count as edges.
-        link_re = re.compile(r'\[([^\]]*)\]\(([^)#]+\.md)(?:#[^)]*)?\)')
+        link_re = re.compile(r'\[([^\]]*)\]\(([^)#]+\.md)(?:#[^)]*)?\)', re.IGNORECASE)
 
-        for md_file in knowledge_path.rglob("*.md"):
+        for md_file in knowledge_path.rglob("*.[mM][dD]"):
             # as_posix() rather than str(): on Windows str() keeps the
             # backslashes, and the console consumes these paths with "/"
             # separators (category split, data-path match against the tree).

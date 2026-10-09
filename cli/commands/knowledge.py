@@ -51,7 +51,7 @@ def _stats() -> str:
         rel_root = os.path.relpath(root, knowledge_dir)
         category = rel_root.split(os.sep)[0] if rel_root != "." else "root"
         for f in files:
-            if f.endswith(".md") and f not in ("index.md", "log.md"):
+            if f.lower().endswith(".md") and f not in ("index.md", "log.md"):
                 total_files += 1
                 total_bytes += os.path.getsize(os.path.join(root, f))
                 cat_count[category] = cat_count.get(category, 0) + 1
@@ -96,7 +96,7 @@ def _tree() -> str:
                     children.append((name, child))
         files = [
             name for name in names
-            if name.endswith(".md") and not name.startswith(".")
+            if name.lower().endswith(".md") and not name.startswith(".")
             and os.path.isfile(os.path.join(directory, name))
             and not (is_root and name in ("index.md", "log.md"))
         ]

@@ -369,7 +369,7 @@ class MemoryManager:
             # scans the shared base rather than an empty (or missing) local one.
             knowledge_dir = Path(state_dir.knowledge_dir(base=workspace_dir))
             if knowledge_dir.exists():
-                for file_path in knowledge_dir.rglob("*.md"):
+                for file_path in knowledge_dir.rglob("*.[mM][dD]"):
                     # The root index.md / log.md only restate pages indexed on
                     # their own, and change on every page write, which re-embeds
                     # the whole file each time.
