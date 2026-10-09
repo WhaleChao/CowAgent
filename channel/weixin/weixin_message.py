@@ -133,8 +133,10 @@ class WeixinMessage(ChatMessage):
 
             def _download():
                 path = self._download_media(item, ITEM_VIDEO, cdn_base_url)
-                if path:
-                    self.content = path
+                # An empty path means the download failed; keep it out of
+                # content so a caller cannot mistake the placeholder for a
+                # file that landed. Same shape as the image branch above.
+                self.content = path or ""
             self._prepare_fn = _download
 
         elif media_type == ITEM_FILE:
@@ -145,8 +147,10 @@ class WeixinMessage(ChatMessage):
 
             def _download():
                 path = self._download_media(item, ITEM_FILE, cdn_base_url)
-                if path:
-                    self.content = path
+                # An empty path means the download failed; keep it out of
+                # content so a caller cannot mistake the placeholder for a
+                # file that landed. Same shape as the image branch above.
+                self.content = path or ""
             self._prepare_fn = _download
 
         elif media_type == ITEM_VOICE:
@@ -156,8 +160,10 @@ class WeixinMessage(ChatMessage):
 
             def _download():
                 path = self._download_media(item, ITEM_VOICE, cdn_base_url)
-                if path:
-                    self.content = path
+                # An empty path means the download failed; keep it out of
+                # content so a caller cannot mistake the placeholder for a
+                # file that landed. Same shape as the image branch above.
+                self.content = path or ""
             self._prepare_fn = _download
 
     def _download_media(self, item: dict, media_type: int, cdn_base_url: str) -> str:

@@ -483,10 +483,21 @@ class ToolManager:
             except Exception as e:
                 logger.warning(f"[MCP] Error shutting down '{server_name}': {e}")
         # Drop tools that belonged to this server.
+        retired = []
         for tool_name in list(self._mcp_tool_instances.keys()):
             tool = self._mcp_tool_instances.get(tool_name)
             if tool is not None and getattr(tool, "server_name", None) == server_name:
                 self._mcp_tool_instances.pop(tool_name, None)
+                retired.append(tool_name)
+        # ...and their description vectors with them. The vector index is keyed
+        # by tool name, and _ensure_mcp_tool_vectors only fills MISSING names,
+        # so a tool republished later under a name this server owned would
+        # inherit this server's description embedding forever -- and be ranked
+        # against a query it can no longer answer.
+        if retired:
+            with self._mcp_vector_lock:
+                for tool_name in retired:
+                    self._mcp_tool_vectors.pop(tool_name, None)
         self._mcp_status.pop(server_name, None)
 
     def _load_mcp_tools_async(self, mcp_servers_config):
@@ -736,6 +747,13 @@ class ToolManager:
         """Incrementally embed MCP tools that are not yet cached."""
         # Snapshot to avoid concurrent-mutation while the async loader runs.
         current = dict(self._mcp_tool_instances)
+        with self._mcp_vector_lock:
+            # A name whose tool is gone keeps its vector otherwise, and the
+            # cache then only grows across reload cycles. Teardown drops the
+            # vectors it can attribute to a server; this catches the rest,
+            # such as a loader that failed part way through publishing.
+            for stale in [n for n in self._mcp_tool_vectors if n not in current]:
+                self._mcp_tool_vectors.pop(stale, None)
         missing = [name for name in current if name not in self._mcp_tool_vectors]
         if not missing:
             return

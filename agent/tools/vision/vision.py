@@ -641,7 +641,9 @@ class Vision(BaseTool):
         """Build a VisionProvider from a custom:<id> entry in custom_providers.
         Uses the standard OpenAI /chat/completions endpoint — any
         OpenAI-compatible multimodal endpoint works."""
-        from models.custom_provider import parse_custom_bot_type, get_custom_providers, _find_provider_by_id
+        from models.custom_provider import (
+            parse_custom_bot_type, get_custom_providers, get_provider_headers, _find_provider_by_id,
+        )
         _, custom_id = parse_custom_bot_type(provider_id)
         if not custom_id:
             return None
@@ -662,6 +664,7 @@ class Vision(BaseTool):
             name=entry.get("name") or provider_id,
             api_key=api_key,
             api_base=self._ensure_v1(api_base.rstrip("/")),
+            extra_headers=get_provider_headers(entry),
             model_override=model,
         )
 
@@ -894,12 +897,6 @@ class Vision(BaseTool):
             ],
         }
 
-        headers = {
-            "Authorization": f"Bearer {provider.api_key}",
-            "Content-Type": "application/json",
-            **provider.extra_headers,
-        }
-
         endpoint = "/chat/completions"
         if provider.use_responses:
             from models.openai import responses_adapter
@@ -911,8 +908,17 @@ class Vision(BaseTool):
             )
             endpoint = "/responses"
 
+        from models.openai.openai_http_client import resolve_host_headers
+        url = f"{provider.api_base}{endpoint}"
+        headers = {
+            "Authorization": f"Bearer {provider.api_key}",
+            "Content-Type": "application/json",
+            **resolve_host_headers(url),
+            **provider.extra_headers,
+        }
+
         resp = requests.post(
-            f"{provider.api_base}{endpoint}",
+            url,
             headers=headers,
             json=payload,
             timeout=DEFAULT_TIMEOUT,

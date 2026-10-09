@@ -735,9 +735,15 @@ class BrowserService:
         if extra_args:
             launch_args.extend(extra_args)
 
-        viewport_w = self._config.get("viewport_width", 1280)
-        viewport_h = self._config.get("viewport_height", 720)
-        viewport = {"width": viewport_w, "height": viewport_h}
+        # A fixed viewport is emulated on top of the real window (at a device
+        # scale factor of 1), so in a visible window the page would stay at that
+        # size and leave the rest of the window blank. Headed windows therefore
+        # follow the window size unless a viewport is configured explicitly.
+        viewport_w = self._config.get("viewport_width")
+        viewport_h = self._config.get("viewport_height")
+        viewport: Optional[Dict[str, int]] = None
+        if self._headless or viewport_w or viewport_h:
+            viewport = {"width": viewport_w or 1280, "height": viewport_h or 720}
         user_agent = (
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -757,7 +763,14 @@ class BrowserService:
 
         logger.info("[Browser] Browser ready")
 
-    def _launch_fresh(self, launch_args: List[str], viewport: Dict[str, int], user_agent: str):
+    @staticmethod
+    def _viewport_kwargs(viewport: Optional[Dict[str, int]]) -> Dict[str, Any]:
+        """Context kwargs for a fixed viewport, or for following the window size."""
+        if viewport:
+            return {"viewport": viewport}
+        return {"no_viewport": True}
+
+    def _launch_fresh(self, launch_args: List[str], viewport: Optional[Dict[str, int]], user_agent: str):
         """Classic launch: brand new Chromium with an empty context.
 
         When `self._channel` is set (e.g. "chrome"/"msedge"), Playwright drives
@@ -773,13 +786,13 @@ class BrowserService:
             launch_kwargs["channel"] = self._channel
         self._browser = self._playwright.chromium.launch(**launch_kwargs)
         self._context = self._browser.new_context(
-            viewport=viewport,
             user_agent=user_agent,
+            **self._viewport_kwargs(viewport),
         )
         self._page = self._context.new_page()
         self._wire_close_listeners()
 
-    def _launch_persistent(self, launch_args: List[str], viewport: Dict[str, int], user_agent: str):
+    def _launch_persistent(self, launch_args: List[str], viewport: Optional[Dict[str, int]], user_agent: str):
         """Launch Chromium with a persistent user_data_dir so login state survives."""
         os.makedirs(self._user_data_dir, exist_ok=True)
         engine_label = f"system:{self._channel}" if self._channel else "chromium"
@@ -791,8 +804,8 @@ class BrowserService:
             "user_data_dir": self._user_data_dir,
             "headless": self._headless,
             "args": launch_args,
-            "viewport": viewport,
             "user_agent": user_agent,
+            **self._viewport_kwargs(viewport),
         }
         # When driving a system browser, let it use its real UA instead of the
         # spoofed Chromium one (avoids UA/engine mismatch on real Chrome/Edge).
@@ -818,7 +831,7 @@ class BrowserService:
         self._page = pages[0] if pages else self._context.new_page()
         self._wire_close_listeners()
 
-    def _launch_system_cdp(self, launch_args: List[str], viewport: Dict[str, int]):
+    def _launch_system_cdp(self, launch_args: List[str], viewport: Optional[Dict[str, int]]):
         """Spawn the user's system Chrome/Edge with a debugging port, attach via CDP.
 
         This is the default for system browsers. Unlike launch(channel=...), it
@@ -853,16 +866,20 @@ class BrowserService:
         # The spawned Chrome opens its own default context (backed by
         # user_data_dir); reuse it so cookies / logins persist.
         contexts = self._browser.contexts
-        self._context = contexts[0] if contexts else self._browser.new_context(viewport=viewport)
+        self._context = (
+            contexts[0] if contexts
+            else self._browser.new_context(**self._viewport_kwargs(viewport))
+        )
         pages = self._context.pages
         self._page = pages[0] if pages else self._context.new_page()
-        try:
-            self._page.set_viewport_size(viewport)
-        except Exception:
-            pass
+        if viewport:
+            try:
+                self._page.set_viewport_size(viewport)
+            except Exception:
+                pass
         self._wire_close_listeners()
 
-    def _connect_cdp(self, viewport: Dict[str, int]):
+    def _connect_cdp(self, viewport: Optional[Dict[str, int]]):
         """Attach to an existing Chrome started with --remote-debugging-port."""
         endpoint = self._cdp_endpoint
         logger.info(f"[Browser] Connecting to existing Chrome via CDP: {endpoint}")
@@ -883,7 +900,7 @@ class BrowserService:
         if contexts:
             self._context = contexts[0]
         else:
-            self._context = self._browser.new_context(viewport=viewport)
+            self._context = self._browser.new_context(**self._viewport_kwargs(viewport))
 
         pages = self._context.pages
         self._page = pages[0] if pages else self._context.new_page()

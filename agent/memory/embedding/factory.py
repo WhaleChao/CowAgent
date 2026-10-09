@@ -129,6 +129,11 @@ def _init_explicit_provider(provider_key: str):
         cfg_dim = 0
     dim = cfg_dim if cfg_dim > 0 else meta["default_dimensions"]
 
+    extra_headers = None
+    if provider_key.startswith("custom:"):
+        from models.custom_provider import resolve_custom_headers
+        extra_headers = resolve_custom_headers(provider_key) or None
+
     try:
         provider = create_embedding_provider(
             provider=resolved_provider_key,
@@ -136,6 +141,7 @@ def _init_explicit_provider(provider_key: str):
             api_key=api_key,
             api_base=api_base,
             dimensions=dim,
+            extra_headers=extra_headers,
             source_tagged=True if resolved_provider_key == "linkai" else None,
         )
     except Exception as e:

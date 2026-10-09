@@ -404,10 +404,17 @@ class WechatMPChannel(ChatChannel):
         from_user = getattr(msg, "from_user_id", None)
         return from_user or session_id
 
-    def _success_callback(self, session_id, context, **kwargs):  # 线程异常结束时的回调函数
-        logger.debug("[wechatmp] Success to generate reply, msgId={}".format(context["msg"].msg_id))
+    def _release_passive_claim(self, context, session_id):
+        # Called from ChatChannel.produce's paths that answer without queueing
+        # anything, so no Future -- and therefore no done-callback -- will ever
+        # run. passive_reply checks `from_user not in channel.running` before it
+        # starts a task, so a claim left here silences the user permanently.
         if self.passive_reply:
             self.running.discard(self._passive_reply_key(session_id, context))
+
+    def _success_callback(self, session_id, context, **kwargs):  # 线程异常结束时的回调函数
+        logger.debug("[wechatmp] Success to generate reply, msgId={}".format(context["msg"].msg_id))
+        self._release_passive_claim(context, session_id)
 
     def _discard_cached_reply(self, key):
         """Drop one user's cached reply and delete any media it uploaded."""
