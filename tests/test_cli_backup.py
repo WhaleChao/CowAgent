@@ -19,6 +19,46 @@ def _write_json(path: Path, value: dict):
     path.write_text(json.dumps(value), encoding="utf-8")
 
 
+@pytest.mark.parametrize("default", [None, "", "   ", " primary ", "primary"])
+def test_backup_uses_the_registry_default_for_a_supported_roster(tmp_path, default):
+    workspace = tmp_path / "workspace"
+    data = tmp_path / "data"
+    settings = {
+        "agent_workspace": str(workspace),
+        "agents": [
+            {"id": "disabled", "enabled": False},
+            {"id": "primary", "name": "Primary"},
+            {"id": "alpha", "name": "Alpha"},
+        ],
+    }
+    if default is not None:
+        settings["default_agent_id"] = default
+    _write_json(data / "config.json", settings)
+    registry = AgentRegistry.from_config(settings)
+    assert registry.default_agent_id == "primary"
+    for profile in registry.list():
+        profile.workspace_path.mkdir(parents=True, exist_ok=True)
+        (profile.workspace_path / "MEMORY.md").write_text(profile.id, encoding="utf-8")
+
+    archive = tmp_path / "backup.zip"
+    create_backup_archive(archive, data, workspace)
+    with zipfile.ZipFile(archive) as bundle:
+        manifest = json.loads(bundle.read("manifest.json"))
+        assert manifest["workspace_source"] == str(workspace.resolve())
+        for profile in registry.list():
+            assert bundle.read(f"agents/{profile.id}/workspace/MEMORY.md") == profile.id.encode()
+
+    target = tmp_path / "restored-workspace"
+    restored_data = tmp_path / "restored-data"
+    restore_backup_archive(archive, restored_data, target)
+    restored = json.loads((restored_data / "config.json").read_text(encoding="utf-8"))
+    restored_registry = AgentRegistry.from_config(team.resolve(restored))
+    assert restored_registry.default_agent_id == "primary"
+    assert restored_registry.get().workspace_path == target.resolve()
+    for profile in restored_registry.list():
+        assert (profile.workspace_path / "MEMORY.md").read_text(encoding="utf-8") == profile.id
+
+
 def test_backup_restore_round_trip(tmp_path):
     source_data = tmp_path / "source-data"
     source_workspace = tmp_path / "source-workspace"
