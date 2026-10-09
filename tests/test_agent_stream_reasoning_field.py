@@ -132,3 +132,18 @@ def test_list_shaped_reasoning_does_not_crash():
 
     assert text == "answer"
     assert _reasoning_updates(events) == ["block one block two"]
+
+def test_non_string_reasoning_is_ignored():
+    events = []
+    executor = _make_executor(
+        [
+            {"choices": [{"delta": {"thinking": {"type": "enabled"}}}]},
+            {"choices": [{"delta": {"content": "answer"}}]},
+        ],
+        events,
+    )
+
+    text, _, _ = executor._call_llm_stream(retry_on_empty=False)
+
+    assert text == "answer"
+    assert _reasoning_updates(events) == []
