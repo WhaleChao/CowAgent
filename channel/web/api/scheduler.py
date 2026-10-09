@@ -377,29 +377,53 @@ class SchedulerUpdateHandler:
                     # actually owns it.
                     new_instance = (action.get("instance_id") or channel_type).strip()
                     new_receiver = action.get("receiver")
-                    changed = (
+                    repointed = (
                         channel_type != old_channel
                         or new_instance != (original_action.get("instance_id") or old_channel)
                         or new_receiver != original_action.get("receiver")
                     )
-                    if changed:
-                        from agent.tools.scheduler.integration import get_recipient_store
-                        target = get_recipient_store().get(new_instance, new_receiver)
-                        if not target:
-                            return json.dumps({
-                                "status": "error",
-                                "message": "recipient is not in the trusted directory",
-                            }, ensure_ascii=False)
-                        action["channel_type"] = target["channel_type"]
-                        action["instance_id"] = target.get("instance_id") or new_instance
-                        action["receiver"] = target["receiver"]
-                        action["receiver_name"] = target.get("name") or target["receiver"]
-                        action["is_group"] = bool(target.get("is_group", False))
-                        action["notify_session_id"] = target.get("session_id") or target["receiver"]
-                        # No need to touch agent_id: the effective owner of an IM
-                        # task is derived from instance_id's live binding, so
-                        # switching the delivery instance here already moves the
-                        # task to the new instance's Agent on the next tick.
+                    from agent.tools.scheduler.integration import get_recipient_store
+                    target = get_recipient_store().get(new_instance, new_receiver)
+                    if repointed and not target:
+                        return json.dumps({
+                            "status": "error",
+                            "message": "recipient is not in the trusted directory",
+                        }, ensure_ascii=False)
+                    # The delivery identity never comes from the request body.
+                    # The merge above folds the whole body in, and
+                    # notify_session_id decides which conversation the task's
+                    # output is written into, so a body that left channel /
+                    # instance / receiver alone could still redirect the output
+                    # at an arbitrary session -- with the directory never
+                    # consulted, because the lookup sat behind a comparison of
+                    # those three fields alone.
+                    #
+                    # So re-derive it here on every IM edit. When the directory
+                    # knows the recipient that is exactly what create does; when
+                    # it does not -- a recipient since removed, say -- fall back
+                    # to what was stored, so the identity still cannot be set
+                    # from the request. Either way the body has no say.
+                    source = target or original_action
+                    action["channel_type"] = source.get("channel_type") or channel_type
+                    action["instance_id"] = source.get("instance_id") or new_instance
+                    action["receiver"] = source.get("receiver") or new_receiver
+                    action["receiver_name"] = (
+                        source.get("name")
+                        or source.get("receiver_name")
+                        or action["receiver"]
+                    )
+                    action["is_group"] = bool(
+                        source.get("is_group", action.get("is_group", False))
+                    )
+                    action["notify_session_id"] = (
+                        source.get("session_id")
+                        or source.get("notify_session_id")
+                        or action["receiver"]
+                    )
+                    # No need to touch agent_id: the effective owner of an IM
+                    # task is derived from instance_id's live binding, so
+                    # switching the delivery instance here already moves the
+                    # task to the new instance's Agent on the next tick.
                 updates["action"] = action
                 
                 # If schedule was not updated but action was, ensure next_run_at exists
