@@ -424,6 +424,10 @@ class SessionDetailHandler:
             except Exception as e:
                 logger.warning(f"[WebChannel] Cancel on delete failed: {e}")
 
+            from agent.chat.session_service import SessionService
+            sessions = SessionService()
+            teammates = sessions.team_members(session_id, agent_id)
+
             from agent.memory import get_conversation_store
             store = get_conversation_store(_get_workspace_root(agent_id=agent_id))
             store.clear_session(session_id)
@@ -448,6 +452,7 @@ class SessionDetailHandler:
                 ab.clear_session(session_id, agent_id=agent_id)
             except Exception:
                 pass
+            sessions.delete_teammate_copies(session_id, teammates)
 
             channel = WebChannel()
             # Drop messages still waiting in the channel queue: processing them

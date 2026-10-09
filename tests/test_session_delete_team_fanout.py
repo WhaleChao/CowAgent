@@ -1,22 +1,4 @@
-"""Deleting a team conversation must delete it for every participant.
-
-A team conversation keeps one transcript per participant -- every Agent's rows
-live in the same sqlite file, told apart by ``agent_id`` -- and
-``ConversationStore.clear_session`` scopes its DELETE to the handle's own id:
-
-    DELETE FROM messages WHERE agent_id = ? AND session_id = ?
-
-``SessionService.clear_context`` has fanned out across participants since it was
-written, with the reason in its own docstring:
-
-    A team conversation keeps one transcript per participant, so every
-    participant is cleared; otherwise the rest replay it on the next turn.
-
-``delete_session`` had no such fan-out, and its helpers (``_teammates``) were
-already there. So deleting a conversation removed the initiator's copy, reported
-success, and left the other participants still listing the session with their
-transcript intact -- ready to be replayed into the model's context.
-"""
+"""Deleting a team conversation deletes every local participant's copy."""
 
 import pytest
 
@@ -101,7 +83,6 @@ def service(team, monkeypatch):
                                     "" if wanted == default_id else wanted)
 
     monkeypatch.setattr(SessionService, "_get_store", lambda self, agent_id=None: _store_for(agent_id))
-    monkeypatch.setattr(SessionService, "_forget_side_stores", lambda *a, **k: None)
     monkeypatch.setattr(SessionService, "_remove_agent", lambda *a, **k: None)
     monkeypatch.setattr(SessionService, "_cancel_running", lambda *a, **k: 0)
     return handle
@@ -115,27 +96,14 @@ def _listed(store, session_id):
     return session_id in store.list_session_ids()
 
 
-# --- the gap ----------------------------------------------------------------
-
-
-def test_the_service_sees_the_teammate(service, team):
-    from agent.chat.session_service import SessionService
-
-    assert SessionService._teammates(service, team["session_id"], "alpha") == ["beta"]
-
-
 def test_delete_clears_every_participant(service, team):
     session_id = team["session_id"]
 
     service.delete_session(session_id, agent_id="alpha")
 
     assert _messages(team["alpha"], session_id) == []
-    assert _messages(team["beta"], session_id) == [], (
-        "the teammate's transcript outlived the delete"
-    )
-    assert not _listed(team["beta"], session_id), (
-        "the teammate still lists a deleted conversation"
-    )
+    assert _messages(team["beta"], session_id) == []
+    assert not _listed(team["beta"], session_id)
 
 
 def test_a_solo_session_is_unaffected(service, team):
@@ -151,33 +119,24 @@ def test_a_solo_session_is_unaffected(service, team):
     service.delete_session(solo, agent_id="alpha")
 
     assert _messages(team["alpha"], solo) == []
+    assert _messages(team["beta"], team["session_id"])
 
 
-def test_a_missing_teammate_does_not_fail_the_delete(service, team, monkeypatch):
-    # One unreachable participant must not turn a committed delete into an error.
+def test_a_failing_teammate_does_not_fail_the_delete(service, team, monkeypatch):
     from agent.chat.session_service import SessionService
     from agent.memory import conversation_store as cs
 
-    session_id = team["session_id"]
-    default_id = team["default_agent_id"]
-
     def _store_for(agent_id=None):
         if agent_id == "beta":
-            raise RuntimeError("beta's store is unavailable")
-        wanted = agent_id or default_id
-        return cs.ConversationStore(team["db_path"],
-                                    "" if wanted == default_id else wanted)
+            raise RuntimeError("unavailable")
+        return cs.ConversationStore(team["db_path"], team["alpha_id"])
 
     monkeypatch.setattr(SessionService, "_get_store", lambda self, agent_id=None: _store_for(agent_id))
-
-    service.delete_session(session_id, agent_id="alpha")  # must not raise
-
-    assert _messages(team["alpha"], session_id) == [], "the initiator still lost its copy"
+    service.delete_session(team["session_id"], agent_id="alpha")
+    assert _messages(team["alpha"], team["session_id"]) == []
 
 
 def test_the_fanout_does_not_recurse(service, team, monkeypatch):
-    # _teammates is symmetric, so re-entering the fanout would bounce between
-    # the participants forever. fanout=False is what breaks that.
     from agent.chat.session_service import SessionService
 
     seen = []
@@ -188,22 +147,33 @@ def test_the_fanout_does_not_recurse(service, team, monkeypatch):
         return original(self, session_id, agent_id=agent_id, fanout=fanout)
 
     monkeypatch.setattr(SessionService, "delete_session", _counting)
-
     service.delete_session(team["session_id"], agent_id="alpha")
-
-    assert (None, True) in seen or ("alpha", True) in seen
-    assert ("beta", False) in seen, "the teammate must be deleted without re-fanning"
+    assert seen == [("alpha", True), ("beta", False)]
 
 
-def test_a_peer_in_another_process_is_out_of_reach_here(team, monkeypatch):
-    # Documented limit, not a silent one: a teammate the registry does not know
-    # has no local store to clear.
-    service = type("S", (), {"delete_session": lambda self, *a, **k: None})()
-    from agent.chat.session_service import SessionService
+def test_the_web_delete_fans_out_too(service, team, monkeypatch):
+    import json
+    import types
+    from unittest.mock import patch
 
-    monkeypatch.setattr(
-        SessionService, "_get_store",
-        lambda self, agent_id=None: (_ for _ in ()).throw(RuntimeError("no store")),
-    )
-    # Must not raise: the helper is best-effort.
-    SessionService._delete_for_teammate(service, team["session_id"], "some-peer")
+    from channel.web.api import sessions as sessions_api
+
+    class _Channel:
+        session_queues = {}
+
+        def cancel_session(self, *a, **k):
+            pass
+
+        def _session_queue_key(self, *a):
+            return "k"
+
+    session_id = team["session_id"]
+    with patch.object(sessions_api, "_require_auth"), \
+         patch.object(sessions_api.web, "header", lambda *a, **k: None), \
+         patch.object(sessions_api.web, "input", lambda **k: types.SimpleNamespace(agent_id="alpha")), \
+         patch.object(sessions_api, "WebChannel", _Channel), \
+         patch("agent.memory.get_conversation_store", lambda *a, **k: team["alpha"]):
+        response = json.loads(sessions_api.SessionDetailHandler().DELETE(session_id))
+
+    assert response["status"] == "success"
+    assert _messages(team["beta"], session_id) == []

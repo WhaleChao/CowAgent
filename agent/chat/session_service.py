@@ -333,39 +333,33 @@ class SessionService:
         if not session_id:
             raise ValueError("session_id required")
         session_id = self._normalize_sid(session_id)
+        # Read the roster first: forgetting the side stores drops it.
+        teammates = self._teammates(session_id, agent_id) if fanout else []
 
         self._cancel_running(session_id, agent_id)
         store = self._get_store(agent_id)
         store.clear_session(session_id)
         self._forget_side_stores(session_id, agent_id)
         self._remove_agent(session_id, agent_id)
-        # A team conversation keeps one transcript per participant, so every
-        # participant has to lose this session -- otherwise the initiator's
-        # delete reports success while the others still list the conversation
-        # and read the transcript back into their context. clear_context has
-        # fanned out for this since it was written; delete never did.
-        if fanout:
-            for member_id in self._teammates(session_id, agent_id):
-                self._delete_for_teammate(session_id, member_id)
+        # A team conversation keeps one transcript per participant.
+        self.delete_teammate_copies(session_id, teammates)
         logger.info(f"[SessionService] Session deleted: {session_id}")
 
-    def _delete_for_teammate(self, session_id: str, member_id: str) -> None:
-        """Drop one teammate's copy of a deleted session.
+    def delete_teammate_copies(self, session_id: str, teammates) -> None:
+        """Drop each teammate's local copy of a deleted session, best-effort.
 
-        Best-effort, like :meth:`_clear_teammate`: one unreachable participant
-        must not turn a delete the initiator already committed into a failure.
-
-        Every Agent's transcripts live in the one shared sqlite file, so a
-        teammate that is not a separately-addressed Agent still has its rows
-        here. A peer in another process is out of reach for this path --
-        removing that copy needs a transport mode of its own, the way clearing
-        one does.
+        A peer in another process is out of reach here.
         """
-        try:
-            self.delete_session(session_id, agent_id=member_id, fanout=False)
-        except Exception as e:
-            logger.warning(
-                f"[SessionService] Delete failed for agent '{member_id}': {e}")
+        for member_id in teammates:
+            try:
+                self.delete_session(session_id, agent_id=member_id, fanout=False)
+            except Exception as e:
+                logger.warning(
+                    f"[SessionService] Delete failed for agent '{member_id}': {e}")
+
+    def team_members(self, session_id: str, agent_id: str = None) -> list:
+        """Everyone else holding a transcript of this session."""
+        return self._teammates(session_id, agent_id)
 
     def _forget_side_stores(self, session_id: str, agent_id: str = None) -> None:
         """Drop the session's project binding and prefs, each best-effort."""
