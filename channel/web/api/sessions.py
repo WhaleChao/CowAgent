@@ -369,8 +369,6 @@ class SessionsHandler:
             params = web.input(
                 page='1', page_size='50', agent_id='', agent='', scope=''
             )
-            # Clamp before scope=all multiplies page * page_size and slices the
-            # merged list itself, so that path cannot walk off either end.
             from agent.memory.conversation_store import _page_window
             page, page_size = _page_window(params.page, params.page_size, 50)
             if (params.scope or '').strip() == 'all':
