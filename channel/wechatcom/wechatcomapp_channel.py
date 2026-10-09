@@ -2,7 +2,6 @@
 import io
 import os
 import time
-import uuid
 from urllib.parse import urlparse
 
 import web
@@ -18,9 +17,9 @@ from channel.wechatcom.wechatcomapp_client import WechatComAppClient
 from channel.wechatcom.wechatcomapp_message import WechatComAppMessage
 from common.i18n import t as _t
 from common.log import logger
-from common.media_download import MAX_FILE_BYTES, MAX_IMAGE_BYTES, download_bytes, download_to_file
+from common.media_download import MAX_FILE_BYTES, MAX_IMAGE_BYTES, download_bytes, download_to_file, remove_download
 from common.singleton import singleton
-from common.state_dir import tmp_dir
+from common import state_dir
 from common.utils import compress_imgfile, fsize, split_string_by_utf8_length, convert_webp_to_png, remove_markdown_symbol
 from config import conf
 from voice.audio_convert import any_to_amr, split_audio
@@ -31,33 +30,6 @@ MAX_UTF8_LEN = 2048
 # not stop a server that keeps trickling bytes.
 _MAX_REMOTE_IMAGE_SECONDS = 60
 _MAX_REMOTE_FILE_SECONDS = 300
-
-
-def _remove_media_tmp(path: str) -> None:
-    """Delete a media file this channel downloaded.
-
-    A no-op for an empty path, so a caller can pass one unconditionally. A
-    missing file is not an error either: the point is that nothing is left
-    behind, not that this particular delete succeeded.
-    """
-    if not path:
-        return
-    try:
-        os.remove(path)
-    except FileNotFoundError:
-        pass
-    except OSError as e:
-        logger.warning("[wechatcom] media temp cleanup failed for {}: {}".format(path, e))
-
-
-def _media_tmp_path(prefix: str, ext: str = "") -> str:
-    """Path for a file reply that has to be fetched before it can be uploaded.
-
-    The convention the other channels follow: transient media sits in the
-    agent's managed tmp dir, not in a bare ``/tmp`` that resolves against a
-    different drive depending on where the process was launched.
-    """
-    return os.path.join(str(tmp_dir()), f"{prefix}_{uuid.uuid4().hex[:8]}{ext}")
 
 
 @singleton
@@ -233,13 +205,10 @@ class WechatComAppChannel(ChatChannel):
             self.client.message.send_text(self.agent_id, receiver, str(reply.content))
 
     def _resolve_media_path(self, path_or_url: str):
-        """The local file behind a file reply: a ``file://`` path, a URL to
-        fetch, or a plain path. Empty when it cannot be resolved.
+        """Resolve a ``file://`` path, URL or plain path to a local file.
 
-        Returns ``(path, downloaded)``. ``downloaded`` says the file is this
-        method's own tmp artifact and the caller owns removing it -- a
-        ``file://`` path or a bare local path belongs to the agent and must
-        survive the send.
+        Returns ``(path, downloaded)``; ``downloaded`` is set only for a fetched
+        temp file the caller must remove. Both are empty when unresolvable.
         """
         path = (path_or_url or "").strip()
         downloaded = ""
@@ -248,7 +217,7 @@ class WechatComAppChannel(ChatChannel):
         if path.startswith(("http://", "https://")):
             try:
                 ext = os.path.splitext(urlparse(path).path)[1] or ".bin"
-                local = _media_tmp_path("wechatcom_file", ext)
+                local = state_dir.tmp_file("wechatcom_file", ext)
                 download_to_file(path, local, MAX_FILE_BYTES, timeout=60, max_seconds=_MAX_REMOTE_FILE_SECONDS)
                 path = local
                 downloaded = local
@@ -274,9 +243,7 @@ class WechatComAppChannel(ChatChannel):
         # The bridge stamps the document's real name on the reply; a cloud
         # URL's last segment is a random hash and would rename the user's file.
         name = getattr(reply, "file_name", "") or os.path.basename(path)
-        # Whatever this method fetched goes away with it; the voice branch above
-        # already cleans up its own files, and nothing anywhere sweeps the
-        # managed tmp dir.
+        # Nothing sweeps the managed tmp dir, so a download is removed here.
         try:
             try:
                 with open(path, "rb") as f:
@@ -290,7 +257,7 @@ class WechatComAppChannel(ChatChannel):
                 self.client.message.send_file(self.agent_id, receiver, response["media_id"])
             logger.info("[wechatcom] send{}={}, receiver={}".format(media_type.capitalize(), path, receiver))
         finally:
-            _remove_media_tmp(downloaded)
+            remove_download(downloaded)
 
 
 class Query:

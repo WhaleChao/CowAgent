@@ -369,8 +369,8 @@ class SessionsHandler:
             params = web.input(
                 page='1', page_size='50', agent_id='', agent='', scope=''
             )
-            from agent.memory.conversation_store import _page_window
-            page, page_size = _page_window(params.page, params.page_size, 50)
+            from agent.memory.conversation_store import page_window
+            page, page_size = page_window(params.page, params.page_size, 50)
             if (params.scope or '').strip() == 'all':
                 result = _list_sessions_across_agents(page, page_size)
                 return json.dumps({"status": "success", **result}, ensure_ascii=False)

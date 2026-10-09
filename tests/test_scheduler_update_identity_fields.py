@@ -1,30 +1,4 @@
-"""A scheduled task's delivery identity must come from the trusted directory.
-
-``SchedulerUpdateHandler`` merges the whole request body into the stored action
-so that scheduler metadata survives an unrelated edit::
-
-    action = dict(original_action)
-    action.update(action_patch)
-
-The trusted-recipient lookup sat behind ``if changed``, and ``changed`` only
-compared ``channel_type`` / ``instance_id`` / ``receiver``. So a request that
-left those three alone kept whatever ``notify_session_id``, ``receiver_name``
-and ``is_group`` it had sent -- and the directory was never consulted.
-
-``notify_session_id`` is not cosmetic. ``integration.execute_task`` reads it as
-the session a task's output is written into::
-
-    session_id = action.get("notify_session_id") or action.get("receiver")
-
-which reaches ``remember_scheduled_output`` -> ``_persist_messages``, appending
-a user/assistant pair to *that* conversation's persistent history and its
-in-memory context buffer.
-
-The comment above the lookup already stated the intended rule -- "take its
-identity from the store rather than trusting the request body -- the same rule
-the create endpoint enforces" -- and ``SchedulerCreateHandler`` does exactly
-that, building all seven identity fields from the store entry.
-"""
+"""A scheduled task's delivery identity must come from the trusted directory."""
 
 import json
 import sys

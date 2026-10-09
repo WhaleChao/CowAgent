@@ -1,22 +1,4 @@
-"""A failed create_backup must not cost the user a restorable undo slot.
-
-``create_backup`` snapshots files into
-``memory/.evolution_backups/<id>/`` and writes the manifest last. If a copy
-fails part way through, the directory it already made holds a partial payload
-and no manifest -- and ``restore_backup`` refuses a directory without one::
-
-    if not manifest_path.exists():
-        logger.warning(f"[Evolution] Backup not found: {backup_id}")
-        return False
-
-So the directory was never a backup. But ``_prune_old_backups`` counted
-*directories*, so the debris took one of the ``_MAX_BACKUPS`` slots and evicted
-a snapshot that could still be undone. Measured on unfixed code, one failed
-backup left 10 directories of which only 8 were restorable.
-
-Both halves are covered here: the failure path cleans up after itself, and the
-pruner only spends a slot on a snapshot that can actually be restored.
-"""
+"""A failed create_backup must not cost the user a restorable undo slot."""
 
 import shutil
 

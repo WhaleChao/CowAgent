@@ -1,24 +1,4 @@
-"""A streaming OpenAI-compatible response must not park its consumer forever.
-
-`_stream_completion` bounds the wait for the *first* event:
-
-    _FIRST_EVENT_TIMEOUT_SECONDS = 30
-    first_item = output.get(timeout=_FIRST_EVENT_TIMEOUT_SECONDS)
-
-but every later frame came off a bare `output.get()`. Once the role frame was
-out, a model call that never returned left the generator parked on that get
-forever, so:
-
-- the client never got an error and never saw the stream end;
-- the ``finally`` block -- ``closed.set()`` plus ``_cancel_agent_request()`` --
-  never ran, so the run was never cancelled;
-- the worker stayed inside ``run_chat``, still holding
-  ``_SESSION_LOCKS[hash(session_id) % 64]``, and the next request for that
-  session blocked on the same lock.
-
-The web SSE stream in ``channel/web/core/channel.py`` already bounds the same
-wait (600s idle, 60s after a cancel); this applies the equivalent budget here.
-"""
+"""A streaming OpenAI-compatible response must not park its consumer forever."""
 
 import threading
 import time

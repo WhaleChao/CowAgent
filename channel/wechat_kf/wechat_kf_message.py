@@ -126,9 +126,7 @@ class WechatKfMessage(ChatMessage):
                     try:
                         save_response(response, save_path, MAX_FILE_BYTES)
                     except Exception as e:
-                        # Leave content empty rather than pointing at a file
-                        # that was never written: the caller caches this value
-                        # and hands it to the agent as a readable reference.
+                        # Leave content empty; the caller caches it as a readable file reference.
                         self.content = ""
                         logger.error(f"[wechat_kf] Failed to download file: {e}")
                     else:

@@ -74,34 +74,23 @@ def _is_strictly_within(inner: Path, outer: Path) -> bool:
     return True
 
 
-# The conversation tables that carry an agent_id column, oldest-referenced first.
-# No foreign keys are declared between them (conversation_store), so the order
-# only keeps the reads below tidy.
+# Conversation tables that carry an agent_id column.
 _AGENT_SCOPED_TABLES = ("messages", "runs", "artifacts", "sessions")
 
 
 def _forget_agent_conversations(agent_id: str):
     """Erase a deleted Agent's rows from the shared conversation file.
-
-    Every Agent's conversations live in ONE sqlite file -- the default Agent's
-    ``memory/long-term/index.db`` -- told apart by an ``agent_id`` column, so a
-    deleted Agent's transcripts outlive its workspace and reappear the moment
-    the same id is created again. Same sweep as ``session_prefs.forget_agent``
-    and ``project_store.forget_agent``, for the sibling store that holds the
-    conversation bodies.
-
-    Returns the number of rows removed. Raises if the sweep could not run --
-    the caller reports that, because a silent skip here is what leaves the data
-    behind in the first place.
+    
+    Conversations live in the default Agent's index.db, scoped by agent_id, so
+    they outlive the deleted workspace. Returns the number of rows removed and
+    raises if the sweep could not run, so the caller can report it.
     """
     if not agent_id:
         return 0
 
     from agent.memory.conversation_store import get_conversation_store
 
-    # The default Agent's handle resolves to the shared file; its own agent_id is
-    # "" (or the default id), so every row deleted here is matched by id, never
-    # by handle scope.
+    # Rows are matched by agent_id; the default Agent's handle is the shared file itself.
     conn = get_conversation_store()._connect()
     removed = 0
     try:
@@ -675,14 +664,8 @@ class AgentAdminService:
             except Exception as e:
                 logger.warning(f"[AgentAdmin] avatar cleanup after delete failed: {e}")
 
-            # And so do the conversations: every Agent's sessions, messages,
-            # artifacts and scheduled runs share ONE sqlite file -- the default
-            # Agent's memory/long-term/index.db -- told apart by an agent_id
-            # column (see conversation_store.get_conversation_store). That file
-            # is not under the deleted Agent's workspace, so the rmtree above
-            # never reached it, and an Agent recreated with the same id would
-            # inherit the old transcripts. Needs the same sweep as the two
-            # stores above, for the same reason they document.
+            # Conversations live in the default Agent's shared index.db, outside the
+            # deleted workspace, so a recreated Agent with the same id would inherit them.
             try:
                 _forget_agent_conversations(agent_id)
             except Exception as e:

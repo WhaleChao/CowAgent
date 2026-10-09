@@ -16,6 +16,7 @@ import re
 import threading
 import time
 import uuid
+from typing import List, Optional
 from urllib.parse import urlparse
 
 import requests
@@ -23,7 +24,6 @@ import web
 import websocket
 
 from bridge.context import Context, ContextType
-from typing import List, Optional
 from bridge.reply import Reply, ReplyType
 from channel.chat_channel import ChatChannel, check_prefix
 from channel.wecom_bot.wecom_bot_crypt import WecomBotCrypt
@@ -31,7 +31,7 @@ from channel.wecom_bot.wecom_bot_message import WecomBotMessage
 from common import state_dir
 from common.expired_dict import ExpiredDict
 from common.log import logger
-from common.media_download import MAX_FILE_BYTES, MAX_IMAGE_BYTES, download_to_file
+from common.media_download import MAX_FILE_BYTES, MAX_IMAGE_BYTES, download_to_file, remove_download
 from common.singleton import singleton
 from common.ws_client_compat import websocket_app_run_forever
 from config import conf
@@ -43,40 +43,9 @@ MEDIA_CHUNK_SIZE = 512 * 1024  # 512KB per chunk (before base64 encoding)
 # receive-message URL must point at this path, e.g. http://host:9892/wecombot
 CALLBACK_PATH = "/wecombot"
 
-# Wall-clock ceiling for one downloaded reply. The socket timeout below only
-# bounds the gap between two chunks, so without this a server that trickles
-# keeps the read -- and the shared reply thread it runs on -- busy forever.
+# Wall-clock budget for one downloaded reply; the socket timeout alone never
+# stops a server that keeps trickling bytes.
 _MAX_REMOTE_MEDIA_SECONDS = 60
-
-
-def _remove_media_tmp(path: str) -> None:
-    """Delete a media file this channel downloaded.
-
-    A no-op for an empty path, so callers can pass a path that was never
-    created (a failed download, or a local file the agent produced itself --
-    those must survive).
-    """
-    if not path:
-        return
-    try:
-        os.remove(path)
-    except FileNotFoundError:
-        pass
-    except OSError as e:
-        logger.warning(f"[WecomBot] media temp cleanup failed for {path}: {e}")
-
-
-def _media_tmp_path(prefix: str, ext: str = "") -> str:
-    """Path for transient media this channel downloads or synthesizes.
-
-    Transient media belongs in the agent's managed tmp dir -- the convention
-    every other channel follows through ``common.state_dir.tmp_dir()``. A bare
-    ``/tmp/...`` is not portable: on Windows it resolves against the *current
-    drive*, so the same process writes to a different disk depending on where it
-    was launched, and it sits outside the workspace the app manages (and cleans).
-    ``tmp_dir()`` also creates the directory, which ``/tmp`` does not guarantee.
-    """
-    return os.path.join(str(state_dir.tmp_dir()), f"{prefix}_{uuid.uuid4().hex[:8]}{ext}")
 
 
 def _image_ext(content_type: str) -> str:
@@ -100,16 +69,10 @@ def _download_remote_media(
     """Download one reply into managed tmp storage; returns (path, size, content_type).
 
     ``ext=None`` means an image whose extension comes from the Content-Type.
-
-    ``max_seconds`` caps the whole transfer, because the socket timeout only
-    bounds the gap between two chunks: a server that trickles one byte before
-    ``read_timeout`` elapses keeps the read going forever, and ``send()`` runs
-    on the shared reply thread, so every later message stalls with it. The
-    other channels that download reply media all pass an explicit budget
-    (dingtalk ``_MAX_REMOTE_FILE_SECONDS``, feishu ``_MAX_REMOTE_VIDEO_SECONDS``,
-    wechatcom ``_MAX_REMOTE_IMAGE_SECONDS``).
+    ``max_seconds`` caps the whole transfer, since ``send()`` runs on the shared
+    reply thread and a stalled download would block every later message.
     """
-    path = _media_tmp_path(prefix)
+    path = state_dir.tmp_file(prefix)
     size, content_type = download_to_file(
         url,
         path,
@@ -1159,12 +1122,7 @@ class WecomBotChannel(ChatChannel):
         if local_path.startswith("file://"):
             local_path = local_path[7:]
 
-        # Everything this method downloads or derives lands in managed tmp and
-        # has to leave with it: the download itself, the format conversion and
-        # the compression each write a fresh file, and none of them is ever
-        # removed (the callback path's base64 loader already cleans up its own,
-        # which is what makes the contrast easy to miss). A local file the agent
-        # produced is NOT registered -- deleting that would destroy user data.
+        # Only files downloaded or derived here; a local file the agent produced must survive.
         temp_files: List[str] = []
         try:
             if local_path.startswith(("http://", "https://")):
@@ -1206,11 +1164,10 @@ class WecomBotChannel(ChatChannel):
             self._upload_and_reply_image(local_path, receiver, is_group, req_id)
         finally:
             for path in temp_files:
-                _remove_media_tmp(path)
+                remove_download(path)
 
     def _upload_and_reply_image(self, local_path, receiver, is_group, req_id=None):
-        """Upload one prepared image and send it. Split out so _send_image's
-        cleanup covers every exit, including an upload that raises."""
+        """Upload one prepared image and send it."""
         file_size = os.path.getsize(local_path)
         logger.info(f"[WecomBot] Uploading image: path={local_path}, size={file_size} bytes")
         media_id = self._upload_media(local_path, "image")
@@ -1256,17 +1213,17 @@ class WecomBotChannel(ChatChannel):
                     return file_path
                 # Extension doesn't match — rename/copy with correct extension
                 correct_ext = ".jpg" if fmt == "JPEG" else ".png"
-                out_path = _media_tmp_path("wecom_fmt", correct_ext)
+                out_path = state_dir.tmp_file("wecom_fmt", correct_ext)
                 img.save(out_path, fmt)
                 logger.info(f"[WecomBot] Image renamed: {file_path} -> {out_path} ({fmt})")
                 return out_path
 
             # Unsupported format (WebP, GIF, BMP, etc.) — convert to PNG
             if img.mode == "RGBA":
-                out_path = _media_tmp_path("wecom_fmt", ".png")
+                out_path = state_dir.tmp_file("wecom_fmt", ".png")
                 img.save(out_path, "PNG")
             else:
-                out_path = _media_tmp_path("wecom_fmt", ".jpg")
+                out_path = state_dir.tmp_file("wecom_fmt", ".jpg")
                 img.convert("RGB").save(out_path, "JPEG", quality=90)
             logger.info(f"[WecomBot] Image converted from {fmt} -> {out_path}")
             return out_path
@@ -1284,7 +1241,7 @@ class WecomBotChannel(ChatChannel):
             if img.mode == "RGBA":
                 img = img.convert("RGB")
 
-            out_path = _media_tmp_path("wecom_compressed", ".jpg")
+            out_path = state_dir.tmp_file("wecom_compressed", ".jpg")
             quality = 85
             while quality >= 30:
                 img.save(out_path, "JPEG", quality=quality, optimize=True)
@@ -1317,8 +1274,7 @@ class WecomBotChannel(ChatChannel):
         if local_path.startswith("file://"):
             local_path = local_path[7:]
 
-        # Only a download this method performs is temporary; a file:// path or
-        # a bare local path belongs to the caller and must survive.
+        # Only a download is temporary; a local path belongs to the caller.
         downloaded: Optional[str] = None
         try:
             if local_path.startswith(("http://", "https://")):
@@ -1339,12 +1295,11 @@ class WecomBotChannel(ChatChannel):
 
             self._upload_and_reply_file(local_path, receiver, is_group, req_id, media_type)
         finally:
-            _remove_media_tmp(downloaded)
+            remove_download(downloaded)
 
     def _upload_and_reply_file(self, local_path, receiver, is_group, req_id=None,
                                media_type: str = "file"):
-        """Upload one prepared file and send it. Split out so _send_file's
-        cleanup covers every exit, including an upload that raises."""
+        """Upload one prepared file and send it."""
         media_id = self._upload_media(local_path, media_type)
         if not media_id:
             logger.error(f"[WecomBot] Failed to upload {media_type}")
@@ -1377,9 +1332,7 @@ class WecomBotChannel(ChatChannel):
         if local_path.startswith("file://"):
             local_path = local_path[7:]
 
-        # The download and the amr conversion both write into managed tmp and
-        # neither was ever removed. A voice the agent produced locally is not
-        # registered, and neither is the source when it already is an amr.
+        # The download and the amr conversion; a local voice file is kept.
         temp_files: List[str] = []
         try:
             if local_path.startswith(("http://", "https://")):
@@ -1413,11 +1366,10 @@ class WecomBotChannel(ChatChannel):
             self._upload_and_reply_voice(amr_path, receiver, is_group, req_id)
         finally:
             for path in temp_files:
-                _remove_media_tmp(path)
+                remove_download(path)
 
     def _upload_and_reply_voice(self, amr_path, receiver, is_group, req_id=None):
-        """Upload one prepared voice file and send it. Split out so
-        _send_voice's cleanup covers every exit, including a raise."""
+        """Upload one prepared voice file and send it."""
         media_id = self._upload_media(amr_path, "voice")
         if not media_id:
             logger.error("[WecomBot] Failed to upload voice media")

@@ -520,9 +520,9 @@ class SessionService:
         agent_id = payload.get("agent_id") or self.agent_id
         try:
             if action == "list_sessions":
-                from agent.memory.conversation_store import _page_window
+                from agent.memory.conversation_store import page_window
 
-                page, page_size = _page_window(payload.get("page", 1), payload.get("page_size", 50), 50)
+                page, page_size = page_window(payload.get("page", 1), payload.get("page_size", 50), 50)
                 result = self.list_sessions(
                     channel_type=payload.get("channel_type"),
                     page=page,

@@ -17,10 +17,8 @@ from common.log import logger
 from common.markdown_fence import replace_fenced_blocks
 
 _STREAM_THROTTLE_S = 0.15
-# How long the finalizing card update may take before we stop waiting for it.
-# Feishu's streaming queue drains without a budget; DingTalk must bound the
-# agent thread, so the bound has to feed back into the delivery claim instead
-# of being swallowed.
+# How long the finalizing card update may take before we stop waiting; a
+# timeout feeds back into the delivery claim.
 _FINALIZE_JOIN_SECONDS = 8.0
 _FENCE_RE = re.compile(r"```[\w+-]*\n.*?```", re.DOTALL)
 _INLINE_CODE_RE = re.compile(r"`[^`\n]+`")
@@ -269,10 +267,7 @@ class DingTalkCardStreamer:
                 kind, payload = item
                 self._apply(kind, payload)
         finally:
-            # The sentinel retires this worker, so drop the dead reference.
-            # Leaving it behind would make _start_worker's guard believe a
-            # live consumer still exists and silently swallow every later
-            # update on this streamer.
+            # The sentinel retires this worker; drop it so _start_worker can start a new one.
             if self._worker is threading.current_thread():
                 self._worker = None
 
@@ -291,13 +286,10 @@ class DingTalkCardStreamer:
 
     def _submit(self, kind: str, payload=None, wait: bool = False) -> bool:
         """Queue one card update; report whether it was applied.
-
-        Streaming pushes return True as soon as they are queued, but a
-        waiting submit (the finish/fail finalize) only returns True once the
-        worker has actually run it. A card API that stalls past the join
-        budget leaves the card on its spinner, and the caller must not claim
-        the reply was delivered -- send() reads that claim to decide whether
-        it still owes the user a webhook fallback.
+        
+        Streaming pushes return True once queued; a waiting submit (finalize)
+        returns True only after the worker ran it, so send() knows whether it still
+        owes a webhook fallback.
         """
         if self.immediate:
             self._apply(kind, payload)

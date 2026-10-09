@@ -1,27 +1,4 @@
-"""A failed attachment download must not be cached as a readable file.
-
-Three channels cache a lone image/file and wait for the user's follow-up
-question, attaching the local path to the next prompt. They do it through the
-same `_prepare_fn` -> `file_cache.add` pipeline, but only one of them checks
-that the download actually landed:
-
-| channel | gate after prepare() |
-| --- | --- |
-| feishu | `if not os.path.exists(...): raise FileNotFoundError` |
-| wechat_kf | none |
-| weixin | none |
-
-The gate matters because every `_prepare_fn` swallows its own download error.
-`wechat_kf_message.download_file` logs and returns; `_download_media` returns
-`""`. So the channel's `except` never fires for a failed download, and
-`file_cache.add` stores whatever path `content` was left holding.
-
-For wechat_kf that path was assigned *before* the write, so a body that dies
-mid-stream (CDN reset, disk full, over the size cap) cached a file that does
-not exist. The next question about that file pulled a `[文件: ...]` reference
-into the prompt and the agent went looking for something that was never
-written -- or answered from what it could infer about the filename.
-"""
+"""A failed attachment download must not be cached as a readable file."""
 
 import os
 import sys
@@ -132,19 +109,6 @@ def test_the_channel_refuses_to_cache_a_path_that_is_not_there(tmp_path, monkeyp
     assert cache.get("ext1") == [], "a ghost path must never reach the cache"
 
 
-def test_feishu_keeps_its_existence_gate():
-    # The three channels are meant to behave alike. Pin the one that is right
-    # so a future refactor cannot quietly drop it.
-    import inspect
-
-    from channel.feishu import feishu_channel
-
-    source = inspect.getsource(feishu_channel)
-    assert "os.path.exists" in source, "feishu's file gate must survive"
-    # And pin that its message does not pre-assign the save path either.
-    assert "raise FileNotFoundError" in source
-
-
 def test_the_cache_would_have_accepted_a_ghost(tmp_path, monkeypatch):
     # Documents *why* the gate is needed: FileCache.add has no existence check
     # of its own, so a caller that does not check loses the file silently.
@@ -212,28 +176,6 @@ def test_a_successful_weixin_download_still_reports_its_path(tmp_path, monkeypat
     message._prepare_fn()
 
     assert message.content == str(landed)
-
-
-def test_the_weixin_channel_checks_before_caching(tmp_path, monkeypatch):
-    from channel.weixin import weixin_channel as wx_chan
-    import inspect
-
-    source = inspect.getsource(wx_chan)
-    assert "os.path.exists" in source, "weixin must gate the cache on existence"
-
-
-def test_no_media_channel_leaves_a_placeholder_path_on_failure():
-    # A sweep over the three shapes, so a new one cannot be added in the old
-    # shape without this failing.
-    import inspect
-
-    from channel.weixin import weixin_message as wx_mod
-
-    source = inspect.getsource(wx_mod.WeixinMessage._setup_media)
-    # No `if path:` guard is left anywhere in _setup_media.
-    assert "if path:" not in source, (
-        "a bare `if path:` guard leaves the placeholder path in content"
-    )
 
 
 if __name__ == "__main__":

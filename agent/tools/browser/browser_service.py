@@ -735,10 +735,8 @@ class BrowserService:
         if extra_args:
             launch_args.extend(extra_args)
 
-        # A fixed viewport is emulated on top of the real window (at a device
-        # scale factor of 1), so in a visible window the page would stay at that
-        # size and leave the rest of the window blank. Headed windows therefore
-        # follow the window size unless a viewport is configured explicitly.
+        # A fixed viewport would leave the rest of a headed window blank, so headed
+        # windows follow the window size unless a viewport is configured.
         viewport_w = self._config.get("viewport_width")
         viewport_h = self._config.get("viewport_height")
         viewport: Optional[Dict[str, int]] = None

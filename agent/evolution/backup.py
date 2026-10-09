@@ -39,13 +39,7 @@ def _is_within_workspace(workspace: Path, candidate: Path) -> bool:
 
 
 def _discard_incomplete(target: Path) -> None:
-    """Drop a snapshot directory that never got a usable manifest.
-
-    ``restore_backup`` refuses a directory without a manifest, so such a
-    directory is not a backup at all -- it is only debris from a failed
-    ``create_backup``. Callers must not raise out of this: the caller is
-    already on its way to reporting the original failure.
-    """
+    """Drop a snapshot directory that never got a usable manifest. Never raises."""
     try:
         if target.is_dir():
             shutil.rmtree(target, ignore_errors=True)
@@ -88,9 +82,7 @@ def create_backup(workspace_dir: Path, files: List[Path]) -> Optional[str]:
         return backup_id
     except Exception as e:
         logger.warning(f"[Evolution] Failed to create backup: {e}")
-        # The snapshot never became restorable, so the half-written directory is
-        # not a backup. Leaving it behind lets _prune_old_backups count it as one
-        # of the _MAX_BACKUPS slots, evicting a snapshot the user can still undo.
+        # A half-written snapshot must not take one of the _MAX_BACKUPS slots.
         _discard_incomplete(target)
         return None
 

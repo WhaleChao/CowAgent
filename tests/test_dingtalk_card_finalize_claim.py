@@ -1,19 +1,4 @@
-"""The DingTalk card finalize must not claim delivery it did not achieve.
-
-A streaming card is finalized on a worker thread so a slow DingTalk card API
-cannot block the agent. That worker is joined under a budget, and the budget
-used to be swallowed: _submit() returned nothing, so agent_end set
-context["dingtalk_streamed"] = True even when join() timed out with the
-final PUT still in flight. dingtalk_channel.send() reads that flag to decide
-whether it still owes the user a webhook reply, so the user was left staring
-at a card stuck on PROCESSING with no answer at all.
-
-The same sentinel that ends the worker also left the dead thread referenced,
-so _start_worker()'s guard believed a live consumer existed and every later
-update on that streamer was queued into a void.
-
-dingtalk_stream is stubbed so the suite does not need the optional SDK.
-"""
+"""The DingTalk card finalize must not claim delivery it did not achieve."""
 import sys
 import threading
 import time

@@ -389,20 +389,9 @@ class SchedulerUpdateHandler:
                             "status": "error",
                             "message": "recipient is not in the trusted directory",
                         }, ensure_ascii=False)
-                    # The delivery identity never comes from the request body.
-                    # The merge above folds the whole body in, and
-                    # notify_session_id decides which conversation the task's
-                    # output is written into, so a body that left channel /
-                    # instance / receiver alone could still redirect the output
-                    # at an arbitrary session -- with the directory never
-                    # consulted, because the lookup sat behind a comparison of
-                    # those three fields alone.
-                    #
-                    # So re-derive it here on every IM edit. When the directory
-                    # knows the recipient that is exactly what create does; when
-                    # it does not -- a recipient since removed, say -- fall back
-                    # to what was stored, so the identity still cannot be set
-                    # from the request. Either way the body has no say.
+                    # The delivery identity (notify_session_id decides where output is written)
+                    # never comes from the request body: re-derive it from the directory on every
+                    # IM edit, falling back to the stored value when the recipient is unknown.
                     source = target or original_action
                     action["channel_type"] = source.get("channel_type") or channel_type
                     action["instance_id"] = source.get("instance_id") or new_instance
@@ -420,10 +409,7 @@ class SchedulerUpdateHandler:
                         or source.get("notify_session_id")
                         or action["receiver"]
                     )
-                    # No need to touch agent_id: the effective owner of an IM
-                    # task is derived from instance_id's live binding, so
-                    # switching the delivery instance here already moves the
-                    # task to the new instance's Agent on the next tick.
+                    # agent_id follows instance_id's live binding, so it needs no update here.
                 updates["action"] = action
                 
                 # If schedule was not updated but action was, ensure next_run_at exists

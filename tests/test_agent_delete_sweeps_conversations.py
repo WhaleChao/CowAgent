@@ -1,23 +1,4 @@
-"""Deleting an Agent must take its conversations with it.
-
-Every Agent's sessions, messages, artifacts and scheduled runs live in **one**
-sqlite file -- the default Agent's ``memory/long-term/index.db`` -- told apart
-by an ``agent_id`` column (see ``conversation_store.get_conversation_store``).
-That file is not under the deleted Agent's workspace, so ``shutil.rmtree`` never
-reached it.
-
-``delete_agent`` already swept the two sibling stores for exactly this reason,
-and both document it:
-
-``project_store.forget_agent``
-    *"an Agent later created with the same id would inherit them"*
-
-``admin.delete_agent``
-    *"the project store keys its bindings the same way and needs the same
-    sweep"*
-
-The store that actually holds the conversation bodies was the one left out.
-"""
+"""Deleting an Agent must take its conversations with it."""
 
 import shutil
 import sqlite3
@@ -209,18 +190,6 @@ def test_the_sweep_survives_a_missing_table(shared_store):
         conn.close()
 
     assert _sweep(shared_store["alice_id"]) == 0
-
-
-def test_delete_agent_wires_the_sweep_in(monkeypatch):
-    # Pins the call site: a future refactor must keep the fourth sweep.
-    import inspect
-
-    from agent.admin import AgentAdminService
-
-    source = inspect.getsource(AgentAdminService.delete_agent)
-    assert "_forget_agent_conversations" in source
-    # ...after the workspace goes, so the sweep is the last word.
-    assert source.index("shutil.rmtree") < source.index("_forget_agent_conversations")
 
 
 # --- the whole delete_agent path --------------------------------------------

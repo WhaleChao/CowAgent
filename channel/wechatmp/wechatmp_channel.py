@@ -405,10 +405,8 @@ class WechatMPChannel(ChatChannel):
         return from_user or session_id
 
     def _release_passive_claim(self, context, session_id):
-        # Called from ChatChannel.produce's paths that answer without queueing
-        # anything, so no Future -- and therefore no done-callback -- will ever
-        # run. passive_reply checks `from_user not in channel.running` before it
-        # starts a task, so a claim left here silences the user permanently.
+        # Called when produce answers without queueing, so no done-callback will
+        # release the claim and passive_reply would ignore the user forever.
         if self.passive_reply:
             self.running.discard(self._passive_reply_key(session_id, context))
 

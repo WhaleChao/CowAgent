@@ -85,9 +85,9 @@ def test_history_page_size_is_capped_and_zero_is_safe(store):
     ((None, None), (1, 50)),
 ])
 def test_page_window(raw, expected):
-    from agent.memory.conversation_store import _page_window
+    from agent.memory.conversation_store import page_window
 
-    assert _page_window(*raw, 50) == expected
+    assert page_window(*raw, 50) == expected
 
 
 def test_dispatch_caps_a_remote_page_size(monkeypatch):

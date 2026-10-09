@@ -1,22 +1,4 @@
-"""The day-level dedup hash must be earned, not spent on dispatch.
-
-`test_summarizer_flush_retry.py` pins the per-message hashes to the flush
-outcome: claimed on dispatch, committed only once the summary landed. The
-day-level hash that `create_daily_summary` dedups on was never moved with
-them:
-
-    if content_hash == self._last_flushed_content_hash:
-        return False
-    self._last_flushed_content_hash = content_hash   # recorded first
-    return self.flush_from_messages(...)             # may never land
-
-`flush_from_messages` returning True only means a worker was dispatched, and
-that worker releases the *message* hashes when the provider is unreachable.
-The day hash was already gone by then. The daily timer does not retry within
-the day, and Deep Dream distils daily files -- so an empty one means the whole
-day's conversation was unreachable by any later flush, dream, or search, with
-nothing logged at ERROR to say so.
-"""
+"""The day-level dedup hash must be earned, not spent on dispatch."""
 
 import sys
 from pathlib import Path

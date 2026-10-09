@@ -455,19 +455,11 @@ class ChatChannel(Channel):
 
     def _release_claim(self, context: Context, session_id: str) -> None:
         """Release the "a task is in flight for this conversation" marker.
-
-        A channel that tracks in-flight conversations sets one before calling
-        produce() and clears it from _success_callback / _fail_callback, i.e.
-        from the Future done-callback. The paths that answer without queueing
-        anything -- /cancel, /steer, and a conversation bound to a disabled
-        agent -- never create a Future, so nothing ever runs those callbacks
-        and the marker is held for good. On a passive-reply channel that marker
-        is the only gate in front of produce(), so the user is ignored from
-        then on: every later message takes the "still thinking" branch, and each
-        one burns a request slot and sleeps before answering that the agent is
-        still working.
-
-        Channels with no such marker do nothing here.
+        
+        Normally cleared by the Future done-callback. Paths that answer without
+        queueing (/cancel, /steer, a disabled agent) create no Future, and on a
+        passive-reply channel a stale marker would ignore the user from then on.
+        No-op for channels without such a marker.
         """
         release = getattr(self, "_release_passive_claim", None)
         if callable(release):

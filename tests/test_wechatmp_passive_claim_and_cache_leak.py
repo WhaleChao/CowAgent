@@ -1,41 +1,4 @@
-"""A WeChat-MP passive-reply user must never be silenced for good.
-
-``passive_reply`` claims a conversation before handing it to ``produce()``:
-
-    channel.running.add(from_user)
-    channel.produce(context)
-
-``produce`` either queues the context, where ``_consume_session`` submits it and
-``future.add_done_callback(self._thread_pool_callback(...))`` eventually calls
-``_success_callback`` / ``_fail_callback`` -- both overridden in
-``WechatMPChannel`` to ``running.discard(...)`` -- or it answers inline and
-returns. The claim is what the next request checks:
-
-    if (channel.cache_dict.get(from_user) is None
-            and from_user not in channel.running) or ...
-
-A claim that outlives its task silences the user permanently, and every later
-message burns a request slot sleeping before it answers that the agent is still
-thinking. Only a restart recovers.
-
-Two independent paths leave that state behind, and fixing one does not fix the
-other:
-
-1. **The inline paths.** ``produce`` returns before queueing anything for
-   ``/cancel``, ``/steer``, and a conversation bound to a disabled agent. No
-   queue entry means no Future, and the done-callback that releases the claim is
-   the only other thing that would.
-
-2. **A poisoned cache entry.** ``cache_dict`` is a ``defaultdict(list)``, so
-   reading a user who has nothing cached with ``cache_dict[from_user]``
-   **inserts** an empty list. The ``IndexError`` that followed returned without
-   deleting the entry it had just created, and every cleanup path requires a
-   non-empty list first. That entry then makes ``cache_dict.get(...) is None``
-   false for the lifetime of the process.
-
-The claim tests drive the shipped ``produce``; the cache tests replay the
-shipped read and one asserts on its source.
-"""
+"""A WeChat-MP passive-reply user must never be silenced for good."""
 
 import sys
 import threading

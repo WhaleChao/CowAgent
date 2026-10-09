@@ -1,23 +1,4 @@
-"""A retired MCP server must not leave its description vectors behind.
-
-``ToolManager`` keeps five parallel registries for MCP state. ``_teardown_mcp_server``
-is the only place a server is retired, and it cleared four of them -- the client,
-its pool entry, its tool instances and its status -- but not ``_mcp_tool_vectors``.
-
-That index is keyed by tool name, and its only writer, ``_ensure_mcp_tool_vectors``,
-fills **missing** names:
-
-    missing = [name for name in current if name not in self._mcp_tool_vectors]
-
-So when a reload moves a tool to a different server -- ``mcp.json`` edited,
-server ``alpha`` replaced by ``beta`` publishing the same tool name with a
-different description -- the tool is republished under a name whose vector was
-computed from the *old* description, and never re-embedded. Retrieval then ranks
-it against a description it no longer has.
-
-The cache also only grew: nothing anywhere removed an entry for a tool that was
-gone.
-"""
+"""A retired MCP server must not leave its description vectors behind."""
 
 import threading
 import types

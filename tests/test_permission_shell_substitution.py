@@ -1,23 +1,5 @@
+"""Shell substitutions must not smuggle a gated command past a bash mode."""
 # encoding:utf-8
-"""Shell substitutions must not smuggle a gated command past a bash mode.
-
-``agent/permission/policy.py`` decides whether a ``bash`` call may run under
-``read-only`` and ``workspace-write``, and both gates work the same way:
-``_parse_segments`` splits the line, then each segment is classified. The
-segmenter gets ``$(...)`` for free because ``(`` and ``)`` are already in
-``_SEPARATORS``.
-
-The other two spellings shlex does not know were passing straight through:
-
-- a **backquote** is not a quoting character in posix mode, so
-  ``echo `rm -rf x``` lexed as one token ``'``rm'`` and the ``rm`` inside was
-  never classified at all;
-- ``<(cmd)`` / ``>(cmd)`` produced a plain ``'<(`` token, so the command that
-  generates the substituted path became arguments of the outer command.
-
-Both run real commands in the shell, so both are gaps in the gate rather than
-in the classifier. ``echo $(rm -rf x)`` was already refused; these were not.
-"""
 
 import pytest
 

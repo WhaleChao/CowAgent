@@ -1,11 +1,5 @@
+"""The stream parser must accept every common reasoning field name."""
 # encoding:utf-8
-"""The stream parser must accept every common reasoning field name.
-
-Providers disagree: the usual OpenAI-compatible key is ``reasoning_content``,
-but some (llama.cpp builds, OpenRouter-style gateways) stream the thinking pass
-as ``reasoning``, and a few reuse ``thinking``. Missing any of them drops the
-chain-of-thought silently, so the parser tries them in order.
-"""
 import os
 import sys
 from types import SimpleNamespace

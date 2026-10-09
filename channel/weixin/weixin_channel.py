@@ -10,7 +10,6 @@ import json
 import os
 import threading
 import time
-import uuid
 from typing import Tuple
 
 import requests
@@ -27,7 +26,7 @@ from channel.weixin.weixin_message import WeixinMessage
 from common import state_dir
 from common.expired_dict import ExpiredDict
 from common.log import logger
-from common.media_download import MAX_FILE_BYTES, save_response
+from common.media_download import MAX_FILE_BYTES, remove_download, save_response
 from common.singleton import singleton
 from common.utils import is_cloud_deployment
 from config import conf, get_weixin_credentials_path
@@ -48,29 +47,6 @@ _ADOPT_LOCK = threading.Lock()
 # token -> instance of every Weixin channel logged in in this process. Guarded
 # by _ADOPT_LOCK.
 _ACTIVE_LOGINS = {}
-
-
-def _media_tmp_path(prefix: str, ext: str = "") -> str:
-    """Path for transient media this channel downloads or synthesizes.
-
-    Transient media belongs in the agent's managed tmp dir -- the convention
-    this channel already follows elsewhere through ``common.state_dir``. A bare
-    ``/tmp/...`` is not portable: on Windows it resolves against the *current
-    drive*, so the same process writes to a different disk depending on where it
-    was launched, and it sits outside the workspace the app manages (and cleans).
-    ``tmp_dir()`` also creates the directory, which ``/tmp`` does not guarantee.
-    """
-    return os.path.join(str(state_dir.tmp_dir()), f"{prefix}_{uuid.uuid4().hex[:8]}{ext}")
-
-
-def _remove_media_tmp(path: str) -> None:
-    """Delete a media file this channel downloaded."""
-    if not path:
-        return
-    try:
-        os.remove(path)
-    except OSError as e:
-        logger.warning(f"[Weixin] media temp cleanup failed for {path}: {e}")
 
 
 def _console_print(*args, **kwargs):
@@ -747,10 +723,7 @@ class WeixinChannel(ChatChannel):
 
         if wx_msg.ctype == ContextType.FILE:
             wx_msg.prepare()
-            # _download_media swallows its own failure and returns "", leaving
-            # content pointing at the path it would have written. Caching that
-            # hands the agent a file reference that does not exist, and the
-            # next turn's prompt tells it to read one.
+            # A failed download leaves content pointing at a file that does not exist.
             if not wx_msg.content or not os.path.exists(wx_msg.content):
                 logger.warning(
                     "[Weixin] File download did not land, not caching: %s",
@@ -964,7 +937,7 @@ class WeixinChannel(ChatChannel):
             self._send_text("[Image send failed]", receiver, context_token)
         finally:
             if downloaded:
-                _remove_media_tmp(local_path)
+                remove_download(local_path)
 
     def _send_file(self, file_path_or_url: str, receiver: str, context_token: str):
         local_path, downloaded = self._resolve_media(file_path_or_url)
@@ -988,7 +961,7 @@ class WeixinChannel(ChatChannel):
             self._send_text("[File send failed]", receiver, context_token)
         finally:
             if downloaded:
-                _remove_media_tmp(local_path)
+                remove_download(local_path)
 
     def _send_video(self, video_path_or_url: str, receiver: str, context_token: str):
         local_path, downloaded = self._resolve_media(video_path_or_url)
@@ -1011,7 +984,7 @@ class WeixinChannel(ChatChannel):
             self._send_text("[Video send failed]", receiver, context_token)
         finally:
             if downloaded:
-                _remove_media_tmp(local_path)
+                remove_download(local_path)
 
     @staticmethod
     def _resolve_media_path(path_or_url: str) -> str:
@@ -1042,7 +1015,7 @@ class WeixinChannel(ChatChannel):
                 elif "pdf" in ct:
                     ext = ".pdf"
 
-                tmp_path = _media_tmp_path("wx_media", ext)
+                tmp_path = state_dir.tmp_file("wx_media", ext)
                 save_response(resp, tmp_path, MAX_FILE_BYTES)
                 return tmp_path
             except Exception as e:

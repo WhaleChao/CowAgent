@@ -286,17 +286,13 @@ _SEPARATORS = frozenset({";", "&&", "||", "|", "&", "|&", "(", ")", "{", "}", "\
 
 _OPERATOR_CHARS = set("<>&|;()")
 
-# A backquote is not a quoting character to shlex in posix mode, so
-# ``echo `rm -rf x``` lexes as one token and the gated command inside it is
-# never classified. Its contents are a command the shell runs, so they have to
-# become segments of their own.
+# shlex does not treat backquotes as quotes, so ``echo `cmd``` lexes as one
+# token; the substituted command has to become its own segment.
 _BACKTICK_RE = re.compile(r"(?<!\\)`([^`]*)`")
 
-# ``<(cmd)`` / ``>(cmd)`` run ``cmd`` to produce a path. shlex emits ``<(`` as a
-# plain token, so the inner command is swallowed as arguments of the outer one.
+# ``<(cmd)`` / ``>(cmd)``: shlex emits ``<(`` as a plain token.
 _PROCESS_SUBST_CHARS = frozenset({"<", ">"})
-# Stands in for a substitution the outer command merely receives as an
-# argument. Not a command name and not a path, so neither gate reads it.
+# Placeholder for a substitution passed as an argument; neither gate reads it.
 _SUBSTITUTION = "\x00"
 
 
@@ -369,8 +365,7 @@ def _collect_segments(command: str, segments: List[List[str]]) -> bool:
         command,
     )
     outer, bodies = _split_process_substitutions(command)
-    # Substituted bodies are separate commands the shell runs; classify them
-    # before the outer line so the outer command cannot mask them.
+    # Classify substituted bodies first so the outer command cannot mask them.
     for body in bodies:
         if not _collect_segments(body, segments):
             return False

@@ -43,9 +43,8 @@ _STDIO_ENV_SENSITIVE = ("_KEY", "_SECRET", "_TOKEN", "_PASSWORD", "_PASSWD", "_C
 # already used for connecting, since the endpoint event is due immediately.
 _SSE_DISCOVERY_TIMEOUT = 10
 
-# Ceiling on a POSTed SSE response body. The transport has no natural end (the
-# server may hold the stream open with keepalive comments), so the body is read
-# in bounded chunks against self._timeout instead of one blocking read().
+# Ceiling on a POSTed SSE response body. The server may hold the stream open,
+# so it is read in bounded chunks against self._timeout.
 _SSE_RESPONSE_MAX_BYTES = 32 * 1024 * 1024
 
 
@@ -526,14 +525,10 @@ class McpClient:
 
     def _sse_send(self, message: dict) -> dict:
         """POST a JSON-RPC message to the server and return the response.
-
-        ``urlopen``'s timeout bounds a single socket read and every arriving
-        byte resets it, so one ``resp.read()`` waits for as long as the server
-        keeps trickling -- and the loader walks its servers serially on one
-        background thread, so a server that stalls here leaves every server
-        queued behind it "pending" with its tools silently missing. Read in
-        bounded chunks against self._timeout instead, as _read_sse_response
-        does for the streamable-http transport.
+        
+        The socket timeout resets on every byte, so the body is read in bounded
+        chunks against self._timeout; one stalled server would otherwise block every
+        server queued behind it on the loader thread.
         """
         body = json.dumps(message).encode("utf-8")
         req = urllib.request.Request(
@@ -555,10 +550,7 @@ class McpClient:
                 try:
                     chunk = resp.read1(65536)
                 except AttributeError:
-                    # A response object without read1 (a stub, or an
-                    # implementation that only offers read) still has to be
-                    # bounded, so fall back to a read that cannot outlast the
-                    # remaining budget.
+                    # Without read1, fall back to a read bounded by the remaining budget.
                     chunk = resp.read(65536)
                 if not chunk:
                     break

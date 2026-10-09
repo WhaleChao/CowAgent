@@ -12,9 +12,9 @@ Memory file layout (under workspace_root):
 import os
 from datetime import datetime
 from typing import List, Optional
-from common.log import logger
 
-MAX_PAGE_SIZE = 200
+from agent.memory.conversation_store import page_window
+from common.log import logger
 
 
 class MemoryService:
@@ -44,10 +44,9 @@ class MemoryService:
                                         merged with the nightly dream diaries, so
                                         one tab shows everything the agent learned.
 
-        ``page`` and ``page_size`` are clamped to ``[1, MAX_PAGE_SIZE]``.
+        ``page`` and ``page_size`` are clamped by ``page_window``.
         """
-        page = max(1, int(page))
-        page_size = max(1, min(int(page_size), MAX_PAGE_SIZE))
+        page, page_size = page_window(page, page_size, 20)
 
         if category == "evolution":
             files = self._list_evolution_files()

@@ -588,7 +588,7 @@ def _group_into_display_turns(
 MAX_PAGE_SIZE = 200
 
 
-def _page_window(page: Any, page_size: Any, default_page_size: int,
+def page_window(page: Any, page_size: Any, default_page_size: int,
                  cap: Optional[int] = MAX_PAGE_SIZE) -> tuple:
     """Clamp an untrusted (page, page_size) pair into a usable window.
 
@@ -1738,7 +1738,7 @@ class ConversationStore:
                 "has_more": bool,
             }
         """
-        page, page_size = _page_window(page, page_size, 20)
+        page, page_size = page_window(page, page_size, 20)
         with self._lock:
             conn = self._connect()
             try:
@@ -1906,7 +1906,7 @@ class ConversationStore:
                 "has_more": bool,
             }
         """
-        page, page_size = _page_window(page, page_size, 50, cap=None)
+        page, page_size = page_window(page, page_size, 50, cap=None)
         with self._lock:
             conn = self._connect()
             try:

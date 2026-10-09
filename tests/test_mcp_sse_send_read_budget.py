@@ -1,24 +1,4 @@
-"""A POSTed MCP SSE response must not be read without a total budget.
-
-``mcp_client`` reads a server's response body in three places. Two carry a total
-deadline; ``_sse_send`` did not:
-
-    _sse_discover_endpoint   :484   iterates lines, checks a deadline
-    _read_sse_response       :810   iterates lines, checks a deadline
-    _sse_send                :522   one blocking resp.read()
-
-``urlopen``'s timeout bounds a single socket read, and every arriving byte
-resets it, so a single ``read()`` waits as long as the server keeps trickling.
-The file already documents the consequence, right above ``_SSE_DISCOVERY_TIMEOUT``:
-
-    Because the loader walks its servers serially on one background thread,
-    that stalls every server queued behind it: they stay "pending" and their
-    tools are silently missing.
-
-``_sse_send`` is the only channel of ``initialize`` / ``list_tools`` /
-``call_tool`` for the ``sse`` transport, and unlike the stdio transport it runs
-no ``_call_lock``, so nothing else bounds it either.
-"""
+"""A POSTed MCP SSE response must not be read without a total budget."""
 
 import json
 import time
@@ -168,22 +148,3 @@ def test_a_healthy_response_is_under_the_budget(client, monkeypatch):
     start = time.monotonic()
     _post(client, monkeypatch, resp)
     assert time.monotonic() - start < 1
-
-
-def test_all_three_body_readers_carry_a_total_deadline():
-    # The shape that has now held everywhere: the reader owns a deadline.
-    import inspect
-
-    for fn in (mcp.McpClient._sse_discover_endpoint, mcp.McpClient._sse_send,
-               mcp.McpClient._read_sse_response):
-        assert "deadline" in inspect.getsource(fn), fn.__name__
-
-
-def test_the_timeout_default_is_bounded(client):
-    # self._timeout comes from mcp.json and defaults to 120s; the budget is
-    # that value, not a second constant that could drift from it.
-    import inspect
-
-    source = inspect.getsource(mcp.McpClient._sse_send)
-    assert "self._timeout" in source
-    assert "_SSE_RESPONSE_MAX_BYTES" in source

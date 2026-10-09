@@ -14,6 +14,6 @@ def test_reply_media_download_is_guarded(monkeypatch, tmp_path):
         return DownloadResult(5, "image/png")
 
     monkeypatch.setattr(channel, "download_to_file", download_to_file)
-    monkeypatch.setattr(channel, "_media_tmp_path", lambda prefix, ext="": str(tmp_path / prefix))
+    monkeypatch.setattr(channel.state_dir, "tmp_file", lambda prefix, ext="": str(tmp_path / prefix))
     channel._download_remote_media("https://example.test/a.png", "wecom_img", None, 100, 30)
     assert seen.get("guarded") is True

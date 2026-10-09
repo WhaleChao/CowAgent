@@ -28,11 +28,8 @@ _SESSION_LOCKS = tuple(threading.Lock() for _ in range(64))
 _STREAM_END = object()
 _STREAM_ERROR = object()
 _FIRST_EVENT_TIMEOUT_SECONDS = 30
-# The first event has a budget; the rest of the stream used to have none, so a
-# model call that never returned left the consumer parked on output.get()
-# forever -- its cleanup never ran and the worker kept the session lock. The
-# web SSE stream bounds the same wait at 600s; a tool-heavy turn can be slow,
-# so this matches that rather than the tighter first-event budget.
+# Budget for each later stream event, matching the web SSE stream. Without it
+# a stalled run parks the consumer forever and keeps the session lock.
 _STREAM_IDLE_TIMEOUT_SECONDS = 600
 
 
@@ -341,11 +338,8 @@ def _stream_completion(
                 try:
                     item = output.get(timeout=_STREAM_IDLE_TIMEOUT_SECONDS)
                 except queue.Empty:
-                    # The worker stopped producing without ending the stream.
-                    # Say so instead of holding the socket open indefinitely.
-                    # completed stays False so the finally below still cancels
-                    # the run -- the worker is parked in run_chat holding the
-                    # session lock, and only a cancel releases it.
+                    # The worker stalled. completed stays False so the finally below cancels
+                    # the run and releases the session lock.
                     timed_out = True
                     finish_reason = "error"
                     yield _sse_frame(

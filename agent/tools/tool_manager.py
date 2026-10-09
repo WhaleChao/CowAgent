@@ -489,11 +489,8 @@ class ToolManager:
             if tool is not None and getattr(tool, "server_name", None) == server_name:
                 self._mcp_tool_instances.pop(tool_name, None)
                 retired.append(tool_name)
-        # ...and their description vectors with them. The vector index is keyed
-        # by tool name, and _ensure_mcp_tool_vectors only fills MISSING names,
-        # so a tool republished later under a name this server owned would
-        # inherit this server's description embedding forever -- and be ranked
-        # against a query it can no longer answer.
+        # ...and their description vectors, since _ensure_mcp_tool_vectors only fills
+        # missing names and a reused name would keep a stale embedding.
         if retired:
             with self._mcp_vector_lock:
                 for tool_name in retired:
@@ -748,10 +745,7 @@ class ToolManager:
         # Snapshot to avoid concurrent-mutation while the async loader runs.
         current = dict(self._mcp_tool_instances)
         with self._mcp_vector_lock:
-            # A name whose tool is gone keeps its vector otherwise, and the
-            # cache then only grows across reload cycles. Teardown drops the
-            # vectors it can attribute to a server; this catches the rest,
-            # such as a loader that failed part way through publishing.
+            # Drop vectors for tools that no longer exist, e.g. after a partial load.
             for stale in [n for n in self._mcp_tool_vectors if n not in current]:
                 self._mcp_tool_vectors.pop(stale, None)
         missing = [name for name in current if name not in self._mcp_tool_vectors]
