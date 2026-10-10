@@ -8,7 +8,9 @@ Three modes, ordered from most to least restrictive:
                       writes, env edits) are refused.
 - ``workspace-write`` Free rein inside the session's working directory (the
                       project, plus the Agent's own state dir and the system
-                      temp dir); writes that land outside it are refused.
+                      temp dir); writes that land outside it are refused, as
+                      are writes to the files that widen the Agent's reach
+                      (MCP servers, config, credentials, session settings).
                       Reading anywhere is still allowed.
 - ``full-access``     No confinement. The historical behavior, kept as the
                       default so existing installs are untouched.
@@ -265,6 +267,11 @@ _DESTINATION_ONLY_COMMANDS = frozenset({
     "cp", "copy", "rsync", "install", "ln", "unzip", "tar", "zip",
 })
 
+# When their last operand is a directory, the sources land inside it by name.
+_INTO_DIRECTORY_COMMANDS = frozenset({
+    "mv", "move", "cp", "copy", "rsync", "install", "ln",
+})
+
 # Privilege escalation is out of scope for every gated mode.
 _ESCALATION_COMMANDS = frozenset({"sudo", "doas", "su", "runas", "pkexec"})
 
@@ -506,6 +513,52 @@ def _inside_roots(path: str, roots: Sequence[str], cwd: Optional[str]) -> bool:
     return False
 
 
+def _normalize_protected(paths: Optional[Iterable[str]]) -> frozenset:
+    out = set()
+    for path in paths or []:
+        try:
+            out.add(os.path.normcase(os.path.realpath(os.path.expanduser(path))))
+        except Exception:
+            continue
+    return frozenset(out)
+
+
+def _is_protected(path: str, protected: frozenset, cwd: Optional[str]) -> bool:
+    return bool(protected) and os.path.normcase(_real(path, cwd)) in protected
+
+
+def _protected_operand(
+    name: str, paths: Sequence[str], protected: frozenset, cwd: Optional[str]
+) -> Optional[str]:
+    """The operand through which ``name`` would write a protected file, if any."""
+    if not protected or not paths:
+        return None
+    if name in _DESTINATION_ONLY_COMMANDS:
+        targets = paths[-1:] if len(paths) > 1 else []
+    else:
+        targets = paths
+    for path in targets:
+        if _is_protected(path, protected, cwd):
+            return path
+    if name in _INTO_DIRECTORY_COMMANDS and len(paths) > 1:
+        dest = _real(paths[-1], cwd)
+        if os.path.isdir(dest):
+            for src in paths[:-1]:
+                landed = os.path.join(dest, os.path.basename(src.rstrip("/\\")))
+                if _is_protected(landed, protected, cwd):
+                    return paths[-1]
+    return None
+
+
+def _deny_protected(path: str) -> Decision:
+    return _deny(
+        f"'{path}' controls what this Agent may run or reach (MCP servers, "
+        f"permissions, config or credentials), so it can only be changed in "
+        f"full-access mode. Nothing was written.",
+        WORKSPACE_WRITE,
+    )
+
+
 def _roots_hint(roots: Sequence[str]) -> str:
     return ", ".join(roots[:2]) if roots else "the working directory"
 
@@ -545,6 +598,7 @@ def check_tool_call(
     arguments: Optional[Dict[str, Any]] = None,
     cwd: Optional[str] = None,
     write_roots: Optional[Iterable[str]] = None,
+    protected_paths: Optional[Iterable[str]] = None,
 ) -> Decision:
     """Decide whether ``tool_name`` may run with ``arguments`` under ``mode``.
 
@@ -555,6 +609,7 @@ def check_tool_call(
         cwd: working directory that relative paths resolve against.
         write_roots: directories writes are confined to in workspace-write mode.
             ``cwd`` and the system temp dir are always included.
+        protected_paths: files workspace-write refuses even inside the roots.
 
     Returns:
         A :class:`Decision` whose ``reason`` is written for the model: what was
@@ -569,7 +624,7 @@ def check_tool_call(
 
     if mode == READ_ONLY:
         return _check_read_only(tool_name, args)
-    return _check_workspace_write(tool_name, args, cwd, write_roots)
+    return _check_workspace_write(tool_name, args, cwd, write_roots, protected_paths)
 
 
 def _check_read_only(tool_name: str, args: Dict[str, Any]) -> Decision:
@@ -614,11 +669,15 @@ def _check_workspace_write(
     args: Dict[str, Any],
     cwd: Optional[str],
     write_roots: Optional[Iterable[str]],
+    protected_paths: Optional[Iterable[str]] = None,
 ) -> Decision:
     roots = _normalize_roots(write_roots, cwd)
+    protected = _normalize_protected(protected_paths)
 
     if tool_name in _FILE_WRITE_TOOLS:
         path = str(args.get("path") or "")
+        if path and _is_protected(path, protected, cwd):
+            return _deny_protected(path)
         if path and not _inside_roots(path, roots, cwd):
             return _deny(
                 f"'{path}' is outside the writable area ({_roots_hint(roots)}), so "
@@ -629,7 +688,7 @@ def _check_workspace_write(
         return ALLOW
 
     if tool_name == "bash":
-        return _check_bash_workspace_write(args, cwd, roots)
+        return _check_bash_workspace_write(args, cwd, roots, protected)
 
     return ALLOW
 
@@ -806,7 +865,8 @@ def _workspace_write_paths(name: str, args: Sequence[str]) -> List[str]:
 
 
 def _check_bash_workspace_write(
-    args: Dict[str, Any], cwd: Optional[str], roots: Sequence[str]
+    args: Dict[str, Any], cwd: Optional[str], roots: Sequence[str],
+    protected: frozenset = frozenset(),
 ) -> Decision:
     command = str(args.get("command") or "").strip()
     if not command:
@@ -822,6 +882,8 @@ def _check_bash_workspace_write(
         for target in _redirect_targets(tokens):
             if target in _NULL_SINKS:
                 continue
+            if _is_protected(target, protected, cwd):
+                return _deny_protected(target)
             if not _inside_roots(target, roots, cwd):
                 return _deny(
                     f"the command writes to '{target}', outside the writable area "
@@ -842,7 +904,10 @@ def _check_bash_workspace_write(
         paths = _workspace_write_paths(name, rest)
         if name == "dd":
             paths = [a.split("=", 1)[1] for a in rest if a.startswith("of=")]
-        elif name in _DESTINATION_ONLY_COMMANDS:
+        hit = _protected_operand(name, paths, protected, cwd)
+        if hit:
+            return _deny_protected(hit)
+        if name in _DESTINATION_ONLY_COMMANDS:
             paths = paths[-1:] if len(paths) > 1 else []
 
         for path in paths:
@@ -890,6 +955,8 @@ def describe_mode(mode: str, language: str = "zh", cwd: Optional[str] = None) ->
                 f"files inside {area}.",
                 "",
                 "- Writes outside it are refused; reading anywhere is fine.",
+                "- `mcp.json`, `config.json`, `.env` and the session settings files "
+                "are not writable in this mode, even inside it.",
                 "- If the task genuinely needs to write elsewhere, explain why and let "
                 "the user switch the permission mode.",
             ]
@@ -909,6 +976,7 @@ def describe_mode(mode: str, language: str = "zh", cwd: Optional[str] = None) ->
             f"当前会话为**工作区可写模式**：可以在 {area} 内自由创建和修改文件。",
             "",
             "- 该目录之外的写入会被拒绝；读取不受限制。",
+            "- `mcp.json`、`config.json`、`.env` 和会话设置文件在该模式下不可修改，即使位于该目录内。",
             "- 如果任务确实需要写到其他位置，请说明原因，由用户切换权限模式。",
         ]
     return ["## 🔐 权限", ""] + body + [""]

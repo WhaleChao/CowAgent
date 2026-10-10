@@ -2413,6 +2413,7 @@ class AgentStreamExecutor:
                 arguments,
                 cwd=agent.effective_cwd(),
                 write_roots=agent.write_roots(),
+                protected_paths=agent.protected_paths(),
             )
             return None if decision.allowed else decision.reason
         except Exception as e:
