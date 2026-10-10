@@ -13,6 +13,17 @@ from common.utils import expand_path
 DEFAULT_LIMIT = 500
 
 
+def _coerce_limit(value) -> int:
+    """The model's ``limit`` as a positive int; missing, invalid or non-positive values use the default."""
+    if isinstance(value, bool):
+        return DEFAULT_LIMIT
+    try:
+        limit = int(value)
+    except (TypeError, ValueError):
+        return DEFAULT_LIMIT
+    return limit if limit > 0 else DEFAULT_LIMIT
+
+
 class Ls(BaseTool):
     """Tool for listing directory contents"""
     
@@ -46,7 +57,7 @@ class Ls(BaseTool):
         :return: Directory contents or error
         """
         path = args.get("path", ".").strip()
-        limit = args.get("limit", DEFAULT_LIMIT)
+        limit = _coerce_limit(args.get("limit"))
         
         # Resolve path
         absolute_path = self._resolve_path(path)
