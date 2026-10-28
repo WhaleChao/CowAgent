@@ -19,7 +19,7 @@ from common import const
 
 _RECOMMENDED_MODELS = [
     const.DEEPSEEK_FLASH, const.DEEPSEEK_V4_FLASH, const.DEEPSEEK_V4_PRO,
-    const.MINIMAX_M3,
+    const.MINIMAX_M3_1_FLASH, const.MINIMAX_M3, const.MINIMAX_M2_7_HIGHSPEED, const.MINIMAX_M2_7,
     # claude-opus-5-5 is the Claude default; claude-opus-5 / claude-sonnet-5 / claude-fable-5 follow right after it.
     const.CLAUDE_OPUS_5_5, const.CLAUDE_OPUS_5, const.CLAUDE_SONNET_5, const.CLAUDE_FABLE_5_1, const.CLAUDE_FABLE_5, const.CLAUDE_4_8_OPUS, const.CLAUDE_4_7_OPUS, const.CLAUDE_4_6_SONNET, const.CLAUDE_4_6_OPUS,
     const.GPT_61_SOL, const.GPT_6_LUNA, const.GPT_6_SOL, const.GPT_6_ASTRA, const.GPT_56_LUNA, const.GPT_56_TERRA, const.GPT_56_SOL, const.GPT_55, const.GPT_54, const.GPT_54_MINI, const.GPT_54_NANO, const.GPT_5, const.GPT_41, const.GPT_4o,
@@ -29,7 +29,7 @@ _RECOMMENDED_MODELS = [
     const.DOUBAO_SEED_2_1_PRO, const.DOUBAO_SEED_2_1_TURBO, const.DOUBAO_SEED_2_CODE,
     const.KIMI_K3, const.KIMI_K2_7_CODE, const.KIMI_K2_7_CODE_HIGHSPEED, const.KIMI_K2_6, const.KIMI_K2_5, const.KIMI_K2,
     const.ERNIE_5_1, const.ERNIE_5, const.ERNIE_X1_1, const.ERNIE_45_TURBO_128K, const.ERNIE_45_TURBO_32K,
-    const.MIMO_V2_5_PRO, const.MIMO_V2_5,
+    const.MIMO_V2_6_PRO, const.MIMO_V2_6_FLASH,
 ]
 
 # Generic placeholder hints surfaced in the web console. We deliberately
@@ -82,7 +82,7 @@ PROVIDER_MODELS = OrderedDict([
         "api_base_key": None,
         "api_base_default": "https://api.minimaxi.com/v1",
         "api_base_placeholder": "",
-        "models": [const.MINIMAX_M3_1_FLASH, const.MINIMAX_M3],
+        "models": [const.MINIMAX_M3_1_FLASH, const.MINIMAX_M3, const.MINIMAX_M2_7, const.MINIMAX_M2_7_HIGHSPEED],
     }),
     ("zhipu", {
         "label": {"zh": "智谱AI", "en": "GLM"},
@@ -130,7 +130,7 @@ PROVIDER_MODELS = OrderedDict([
         "api_base_key": "mimo_api_base",
         "api_base_default": "https://api.xiaomimimo.com/v1",
         "api_base_placeholder": _PLACEHOLDER_V1,
-        "models": [const.MIMO_V2_5_PRO, const.MIMO_V2_5],
+        "models": [const.MIMO_V2_6_PRO, const.MIMO_V2_6_FLASH],
     }),
     ("linkai", {
         "label": "LinkAI",

@@ -7,10 +7,12 @@ Login via QR code scan through the ilink bot API.
 
 import glob
 import json
+import mimetypes
 import os
 import threading
 import time
 from typing import Tuple
+from urllib.parse import unquote, urlparse
 
 import requests
 
@@ -47,6 +49,79 @@ _ADOPT_LOCK = threading.Lock()
 # token -> instance of every Weixin channel logged in in this process. Guarded
 # by _ADOPT_LOCK.
 _ACTIVE_LOGINS = {}
+
+# mimetypes lacks Office formats on older Pythons and on Windows depends on
+# the registry, so common types are pinned here.
+_CONTENT_TYPE_EXTS = {
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/png": ".png",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+    "video/mp4": ".mp4",
+    "audio/mpeg": ".mp3",
+    "audio/mp4": ".m4a",
+    "audio/wav": ".wav",
+    "audio/x-wav": ".wav",
+    "audio/amr": ".amr",
+    "audio/silk": ".silk",
+    "application/pdf": ".pdf",
+    "application/msword": ".doc",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+    "application/vnd.ms-excel": ".xls",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+    "application/vnd.ms-powerpoint": ".ppt",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
+    "application/zip": ".zip",
+    "application/x-zip-compressed": ".zip",
+    "application/x-7z-compressed": ".7z",
+    "application/x-rar-compressed": ".rar",
+    "application/vnd.rar": ".rar",
+    "application/gzip": ".gz",
+    "application/x-tar": ".tar",
+    "application/json": ".json",
+    "text/plain": ".txt",
+    "text/markdown": ".md",
+    "text/csv": ".csv",
+    "text/html": ".html",
+}
+
+
+def _valid_ext(ext: str) -> str:
+    ext = (ext or "").lower()
+    if 1 < len(ext) <= 12 and ext[1:].isalnum():
+        return ext
+    return ""
+
+
+def _filename_from_disposition(disposition: str) -> str:
+    """Extract the filename from a Content-Disposition header, if any."""
+    if not disposition:
+        return ""
+    for part in disposition.split(";"):
+        key, _, value = part.strip().partition("=")
+        key = key.strip().lower()
+        value = value.strip().strip('"')
+        if key == "filename*" and value:
+            # RFC 5987: charset'lang'percent-encoded-name
+            return unquote(value.split("'", 2)[-1])
+        if key == "filename" and value:
+            return value
+    return ""
+
+
+def _guess_download_ext(url: str, headers) -> str:
+    """Pick a file extension for a downloaded URL so the saved file keeps its type."""
+    ext = _valid_ext(os.path.splitext(urlparse(url).path)[1])
+    if ext:
+        return ext
+    ext = _valid_ext(os.path.splitext(
+        _filename_from_disposition(headers.get("Content-Disposition", "")))[1])
+    if ext:
+        return ext
+    ct = headers.get("Content-Type", "").split(";")[0].strip().lower()
+    ext = _CONTENT_TYPE_EXTS.get(ct) or _valid_ext(mimetypes.guess_extension(ct) or "")
+    return ext or ".bin"
 
 
 def _console_print(*args, **kwargs):
@@ -117,6 +192,8 @@ class WeixinChannel(ChatChannel):
         self._credentials_path = ""
         self.login_status = self.LOGIN_STATUS_IDLE
         self._current_qr_url = ""
+        # Why the last QR login attempt ended without a login, for status reports.
+        self._login_error = ""
 
         conf()["single_chat_prefix"] = [""]
 
@@ -198,8 +275,9 @@ class WeixinChannel(ChatChannel):
 
         self.login_status = self.LOGIN_STATUS_IDLE
         if not self._stop_event.is_set():
-            logger.info("[Weixin] QR login timed out, waiting for stop or reconnect...")
+            logger.info("[Weixin] QR login ended without success, waiting for stop or reconnect...")
             _console_print("  二维码登录超时，请通过控制台重新接入\n")
+            self._notify_cloud_status("error", self._login_error or "QR login timed out, please reconnect")
             self._stop_event.wait()
 
         logger.info("[Weixin] Login cancelled by stop event")
@@ -422,17 +500,21 @@ class WeixinChannel(ChatChannel):
 
     def _notify_cloud_connected(self):
         """Send connected status to cloud console when login succeeds."""
-        if not self.cloud_mode:
+        self._notify_cloud_status("connected")
+
+    def _notify_cloud_status(self, status: str, error: str = None):
+        """Report a login state change, replacing any QR code reported before."""
+        if not getattr(self, "cloud_mode", False):
             return
         try:
             from common import cloud_client
             client = getattr(cloud_client, "chat_client", None)
             if client and getattr(client, "client_id", None):
                 client.send_channel_status(
-                    "weixin", "connected", channel_id=self._cloud_channel_id()
+                    "weixin", status, error, channel_id=self._cloud_channel_id()
                 )
         except Exception as e:
-            logger.warning(f"[Weixin] Failed to notify cloud connected: {e}")
+            logger.warning(f"[Weixin] Failed to notify cloud status '{status}': {e}")
 
     def _cloud_channel_id(self) -> str:
         """The platform-issued instance id, or "" for the legacy single channel.
@@ -443,21 +525,28 @@ class WeixinChannel(ChatChannel):
         instance_id = getattr(self, "instance_id", "") or ""
         return "" if instance_id in ("", "weixin", "wx") else instance_id
 
+    def _end_qr_login(self, reason: str) -> dict:
+        """Close a QR login attempt that did not log in, keeping *reason* for status reports."""
+        self._login_error = reason
+        self._current_qr_url = ""
+        return {}
+
     def _qr_login(self, base_url: str) -> dict:
         """Perform interactive QR code login. Returns dict with token/base_url or empty dict."""
+        self._login_error = ""
         api = WeixinApi(base_url=base_url)
         try:
             qr_resp = api.fetch_qr_code()
         except Exception as e:
             logger.error(f"[Weixin] Failed to fetch QR code: {e}")
-            return {}
+            return self._end_qr_login(f"Failed to fetch QR code: {e}")
 
         qrcode = qr_resp.get("qrcode", "")
         qrcode_url = qr_resp.get("qrcode_img_content", "")
 
         if not qrcode:
-            logger.error("[Weixin] No QR code returned from server")
-            return {}
+            logger.error(f"[Weixin] No QR code returned from server: {qr_resp}")
+            return self._end_qr_login("No QR code returned from server")
 
         self._current_qr_url = qrcode_url
         logger.info(f"[Weixin] 微信二维码链接: {qrcode_url}")
@@ -465,6 +554,9 @@ class WeixinChannel(ChatChannel):
         self._notify_cloud_qrcode(qrcode_url)
         _console_print("  等待扫码...\n")
 
+        # Status polling may be redirected to another host after the scan; a
+        # fresh code always starts over on the original one.
+        poll_api = api
         scanned_printed = False
         refresh_count = 0
         deadline = time.time() + QR_LOGIN_TIMEOUT_S
@@ -473,13 +565,13 @@ class WeixinChannel(ChatChannel):
             if time.time() >= deadline:
                 logger.warning(f"[Weixin] QR login timed out after {QR_LOGIN_TIMEOUT_S}s")
                 _console_print(f"\n  二维码登录超时（{QR_LOGIN_TIMEOUT_S}s），请重启后重试")
-                break
+                return self._end_qr_login("QR login timed out, please reconnect")
 
             try:
-                status_resp = api.poll_qr_status(qrcode)
+                status_resp = poll_api.poll_qr_status(qrcode)
             except Exception as e:
                 logger.error(f"[Weixin] QR status poll error: {e}")
-                return {}
+                return self._end_qr_login(f"QR status poll failed: {e}")
 
             status = status_resp.get("status", "wait")
 
@@ -490,12 +582,21 @@ class WeixinChannel(ChatChannel):
                 if not scanned_printed:
                     _console_print("  已扫码，请在手机上确认...")
                     scanned_printed = True
-            elif status == "expired":
+            elif status == "scaned_but_redirect":
+                redirect_host = (status_resp.get("redirect_host") or "").strip()
+                if redirect_host:
+                    poll_api = WeixinApi(base_url=f"https://{redirect_host}")
+                    logger.info(f"[Weixin] QR status polling redirected to {redirect_host}")
+                else:
+                    logger.warning("[Weixin] scaned_but_redirect without redirect_host, keep current host")
+            elif status in ("expired", "verify_code_blocked"):
                 refresh_count += 1
                 if refresh_count >= QR_MAX_REFRESHES:
                     logger.warning(f"[Weixin] QR code refreshed {QR_MAX_REFRESHES} times, giving up")
                     _console_print(f"\n  二维码已刷新 {QR_MAX_REFRESHES} 次仍未扫码，请重启后重试")
-                    break
+                    return self._end_qr_login("QR code was not scanned in time, please reconnect")
+                if status == "verify_code_blocked":
+                    logger.warning("[Weixin] Pairing code blocked after wrong attempts, refreshing QR code")
                 _console_print(f"  二维码已过期，正在刷新（{refresh_count}/{QR_MAX_REFRESHES}）...")
                 try:
                     qr_resp = api.fetch_qr_code()
@@ -505,10 +606,10 @@ class WeixinChannel(ChatChannel):
                     # code only ever reports "wait".
                     if not qrcode:
                         logger.error(
-                            "[Weixin] QR refresh returned no qrcode; stopping login"
+                            f"[Weixin] QR refresh returned no qrcode; stopping login: {qr_resp}"
                         )
-                        self._current_qr_url = ""
-                        return {}
+                        return self._end_qr_login("No QR code returned from server")
+                    poll_api = api
                     scanned_printed = False
                     self._current_qr_url = qrcode_url
                     logger.info(f"[Weixin] 微信二维码链接 ({refresh_count}/{QR_MAX_REFRESHES}): {qrcode_url}")
@@ -516,16 +617,25 @@ class WeixinChannel(ChatChannel):
                     self._notify_cloud_qrcode(qrcode_url)
                 except Exception as e:
                     logger.error(f"[Weixin] QR refresh failed: {e}")
-                    return {}
+                    return self._end_qr_login(f"QR refresh failed: {e}")
+            elif status == "need_verifycode":
+                # The pairing code shown on the phone has no input path here, so
+                # waiting would only run into the timeout.
+                logger.warning("[Weixin] Login requires a pairing code, which is not supported")
+                _console_print("\n  微信要求输入配对码，当前版本暂不支持，请稍后重试")
+                return self._end_qr_login("Weixin requires a pairing code for this login, please retry later")
+            elif status == "binded_redirect":
+                logger.warning("[Weixin] Scanned account is already bound, no new credentials issued")
+                return self._end_qr_login("This Weixin account is already connected elsewhere")
             elif status == "confirmed":
                 bot_token = status_resp.get("bot_token", "")
                 bot_id = status_resp.get("ilink_bot_id", "")
-                result_base_url = status_resp.get("baseurl", base_url)
+                result_base_url = status_resp.get("baseurl") or base_url
                 user_id = status_resp.get("ilink_user_id", "")
 
                 if not bot_token or not bot_id:
                     logger.error("[Weixin] Login confirmed but missing token/bot_id")
-                    return {}
+                    return self._end_qr_login("Login confirmed but no credentials returned")
 
                 self._current_qr_url = ""
                 _console_print(f"\n  ✅ 微信登录成功！bot_id={bot_id}")
@@ -542,6 +652,8 @@ class WeixinChannel(ChatChannel):
                 logger.info(f"[Weixin] Credentials saved to {self._credentials_path}")
 
                 return {"token": bot_token, "base_url": result_base_url}
+            else:
+                logger.debug(f"[Weixin] Unhandled QR status '{status}', keep polling")
 
             self._stop_event.wait(1)
 
@@ -573,10 +685,20 @@ class WeixinChannel(ChatChannel):
                             self._get_updates_buf = ""
                             consecutive_failures = 0
                             continue
-                        else:
-                            logger.error("[Weixin] Re-login failed, will retry in 5 minutes")
-                            self._stop_event.wait(300)
-                            continue
+                        if self._stop_event.is_set():
+                            break
+                        # No automatic retry: every round issues fresh QR codes
+                        # nobody is scanning, and a stream of those from one
+                        # network is what upstream risk control flags. A new
+                        # attempt starts when the channel is restarted.
+                        logger.error("[Weixin] Re-login failed, waiting for reconnect")
+                        _console_print("  微信登录已失效且重新扫码未完成，请通过控制台重新接入或重启\n")
+                        self._notify_cloud_status(
+                            "error",
+                            self._login_error or "Weixin session expired, please reconnect",
+                        )
+                        self._stop_event.wait()
+                        break
 
                     consecutive_failures += 1
                     errmsg = resp.get("errmsg", "")
@@ -840,7 +962,8 @@ class WeixinChannel(ChatChannel):
             if getattr(reply, "file_type", "") == "video":
                 self._send_video(reply.content, receiver, context_token)
             else:
-                self._send_file(reply.content, receiver, context_token)
+                self._send_file(reply.content, receiver, context_token,
+                                file_name=getattr(reply, "file_name", ""))
         elif reply.type in (ReplyType.VIDEO, ReplyType.VIDEO_URL):
             self._send_video(reply.content, receiver, context_token)
         elif reply.type == ReplyType.VOICE:
@@ -949,7 +1072,8 @@ class WeixinChannel(ChatChannel):
             if downloaded:
                 remove_download(local_path)
 
-    def _send_file(self, file_path_or_url: str, receiver: str, context_token: str):
+    def _send_file(self, file_path_or_url: str, receiver: str, context_token: str,
+                   file_name: str = ""):
         local_path, downloaded = self._resolve_media(file_path_or_url)
         if not local_path:
             self._send_text("[File send failed: file not found]", receiver, context_token)
@@ -961,7 +1085,7 @@ class WeixinChannel(ChatChannel):
                 context_token=context_token,
                 encrypt_query_param=result["encrypt_query_param"],
                 aes_key_b64=result["aes_key_b64"],
-                file_name=os.path.basename(local_path),
+                file_name=file_name or os.path.basename(local_path),
                 file_size=result["raw_size"],
             )
             self._check_send_response(resp, receiver)
@@ -1010,21 +1134,7 @@ class WeixinChannel(ChatChannel):
             try:
                 resp = requests.get(local_path, timeout=60, stream=True)
                 resp.raise_for_status()
-                ct = resp.headers.get("Content-Type", "")
-                ext = ".bin"
-                if "jpeg" in ct or "jpg" in ct:
-                    ext = ".jpg"
-                elif "png" in ct:
-                    ext = ".png"
-                elif "gif" in ct:
-                    ext = ".gif"
-                elif "webp" in ct:
-                    ext = ".webp"
-                elif "mp4" in ct:
-                    ext = ".mp4"
-                elif "pdf" in ct:
-                    ext = ".pdf"
-
+                ext = _guess_download_ext(local_path, resp.headers)
                 tmp_path = state_dir.tmp_file("wx_media", ext)
                 save_response(resp, tmp_path, MAX_FILE_BYTES)
                 return tmp_path

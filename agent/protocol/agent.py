@@ -53,6 +53,9 @@ _MODEL_SPECS = {
     # Qwen: only 3.8-flash ships a 1M window; keep others conservative.
     "qwen": {"prefix": "qwen3.8-flash", "window": 1000000, "max_output": None,
              "fallback_window": 128000},
+    # MiniMax-M3.1-Flash: 1M context, 512K max output.
+    "minimax": {"prefix": "minimax-m3.1-flash", "window": 1000000, "max_output": 524288,
+                "fallback_window": 128000},
 }
 
 
@@ -65,8 +68,6 @@ def resolve_family_spec(model_name: str):
     numbers) go through here, so a new family entry updates both at once.
     ``max_output`` may be None (no published cap)."""
     name = (model_name or "").lower()
-    if name == "minimax-m3.1-flash":
-        return 1000000, 524288
     if not name:
         return None, None
     version = _first_version(name)

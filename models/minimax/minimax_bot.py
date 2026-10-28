@@ -45,8 +45,11 @@ class MinimaxBot(Bot):
     @property
     def supports_vision(self) -> bool:
         """Return whether the configured chat model accepts image or video input."""
-        model = str(self.args.get("model") or "").strip().lower()
-        return model in NATIVE_VISION_MODELS
+        return self.model_supports_vision(self.args.get("model"))
+
+    @staticmethod
+    def model_supports_vision(model_name: str) -> bool:
+        return str(model_name or "").strip().lower() in NATIVE_VISION_MODELS
 
     def reply(self, query, context: Context = None) -> Reply:
         # acquire reply content
@@ -294,17 +297,15 @@ class MinimaxBot(Bot):
             request_body["reasoning_split"] = True
             thinking = kwargs.get("thinking")
             effort = kwargs.get("reasoning_effort")
-            if model.lower() in NATIVE_VISION_MODELS and thinking and thinking.get("type") == "enabled":
+            is_flash = model.lower() == const.MINIMAX_M3_1_FLASH.lower()
+            if is_flash and thinking is not None:
                 thinking = {"type": "adaptive"}
-            if model.lower() == const.MINIMAX_M3_1_FLASH.lower():
-                if thinking is not None and thinking != {"type": "adaptive"}:
-                    raise ValueError("MiniMax-M3.1-Flash requires adaptive thinking")
-                if effort is not None and effort not in ("low", "medium", "high", "xhigh", "max"):
-                    raise ValueError("Unsupported MiniMax-M3.1-Flash reasoning_effort")
+            elif model.lower() == const.MINIMAX_M3.lower() and thinking and thinking.get("type") == "enabled":
+                thinking = {"type": "adaptive"}
             if model.lower() in NATIVE_VISION_MODELS:
                 if thinking is not None:
                     request_body["thinking"] = thinking
-                if effort is not None:
+                if is_flash and effort in ("low", "medium", "high", "xhigh", "max"):
                     request_body["reasoning_effort"] = effort
 
             logger.debug(f"[MINIMAX] API call: model={model}, tools={len(converted_tools) if converted_tools else 0}, stream={stream}")
@@ -345,8 +346,9 @@ class MinimaxBot(Bot):
             content = msg.get("content")
 
             if role in ("system", "tool") or (role == "assistant" and not isinstance(content, list)):
-                # Native messages already carry tool IDs and reasoning fields.
-                converted.append(dict(msg))
+                allowed = ("role", "content", "tool_calls", "tool_call_id", "name",
+                           "reasoning_content", "reasoning_details")
+                converted.append({key: msg[key] for key in allowed if key in msg})
             elif role == "user":
                 # Handle user message
                 if isinstance(content, list):
@@ -374,14 +376,14 @@ class MinimaxBot(Bot):
                                         "content": result_content
                                     })
 
+                        for tool_result in tool_results:
+                            converted.append(tool_result)
+
                         if text_parts:
                             converted.append({
                                 "role": "user",
                                 "content": "\n".join(text_parts)
                             })
-
-                        for tool_result in tool_results:
-                            converted.append(tool_result)
                     else:
                         # Keep as-is for multimodal content (e.g. image_url blocks)
                         converted.append(msg)

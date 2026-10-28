@@ -89,15 +89,18 @@ def test_tool_roundtrip_preserves_thinking_images_and_tool_ids(monkeypatch, tran
         assert result[0]["content"][0]["thinking"] == "Think carefully."
 
 
-def test_native_history_is_replayed_without_loss(monkeypatch, transport):
+def test_native_history_keeps_api_fields_and_drops_internal_fields(monkeypatch, transport):
     monkeypatch.setattr(minimax_bot, "conf", lambda: {})
     history = [{"role": "system", "content": "System"}, {"role": "user", "content": "Hello"},
                {"role": "assistant", "content": "<think>Keep tags</think>", "reasoning_content": "Keep reasoning",
-                "reasoning_details": [{"text": "Legacy reasoning"}], "tool_calls": [{"id": "c", "type": "function",
+                "reasoning_details": [{"text": "Legacy reasoning"}], "internal_trace": "drop me",
+                "tool_calls": [{"id": "c", "type": "function",
                  "function": {"name": "lookup", "arguments": "{}"}}]},
                {"role": "tool", "tool_call_id": "c", "content": "done"}]
     list(minimax_bot.MinimaxBot().call_with_tools(history))
-    assert transport[0][0][1]["messages"] == history
+    expected = deepcopy(history)
+    expected[2].pop("internal_trace")
+    assert transport[0][0][1]["messages"] == expected
 
 
 @pytest.mark.parametrize("effort", ["low", "medium", "high", "xhigh", "max"])
@@ -109,10 +112,14 @@ def test_flash_efforts(monkeypatch, transport, effort):
 
 
 @pytest.mark.parametrize("kwargs", [{"thinking": {"type": "disabled"}}, {"reasoning_effort": "none"}])
-def test_flash_rejects_incompatible_thinking_before_http(monkeypatch, transport, kwargs):
+def test_flash_normalizes_or_drops_incompatible_options(monkeypatch, transport, kwargs):
     monkeypatch.setattr(minimax_bot, "conf", lambda: {})
-    assert list(minimax_bot.MinimaxBot().call_with_tools([], **kwargs))[0]["error"]
-    assert transport[0] == []
+    list(minimax_bot.MinimaxBot().call_with_tools([], **kwargs))
+    payload = transport[0][0][1]
+    if "thinking" in kwargs:
+        assert payload["thinking"] == {"type": "adaptive"}
+    else:
+        assert "reasoning_effort" not in payload
 
 
 def test_m3_can_disable_thinking_and_explicit_model_override_survives(monkeypatch, transport):
@@ -120,6 +127,12 @@ def test_m3_can_disable_thinking_and_explicit_model_override_survives(monkeypatc
     list(minimax_bot.MinimaxBot().call_with_tools([], model=const.MINIMAX_M3, thinking={"type": "disabled"}))
     assert transport[0][0][1]["model"] == const.MINIMAX_M3
     assert transport[0][0][1]["thinking"] == {"type": "disabled"}
+
+
+def test_m3_does_not_receive_flash_reasoning_effort(monkeypatch, transport):
+    monkeypatch.setattr(minimax_bot, "conf", lambda: {})
+    list(minimax_bot.MinimaxBot().call_with_tools([], model=const.MINIMAX_M3, reasoning_effort="high"))
+    assert "reasoning_effort" not in transport[0][0][1]
 
 
 @pytest.mark.parametrize("model", [const.MINIMAX_M3_1_FLASH, const.MINIMAX_M3])
@@ -134,27 +147,18 @@ def test_native_vision_http_keeps_selected_model(monkeypatch, transport, model):
 
 
 @pytest.mark.parametrize("stream", [False, True])
-@pytest.mark.parametrize("thinking_enabled", [False, True])
-def test_agent_default_reaches_http_with_adaptive_thinking(monkeypatch, transport, stream, thinking_enabled):
-    import config
-    from bridge import agent_bridge
-    from agent.protocol import LLMRequest
-
-    settings = {"bot_type": "minimax", "enable_thinking": thinking_enabled,
-                "reasoning_effort_by_model": {"minimax:minimax-m3.1-flash": "max"}}
-    monkeypatch.setattr(config, "conf", lambda: settings)
-    monkeypatch.setattr(agent_bridge, "conf", lambda: settings)
-    monkeypatch.setattr(minimax_bot, "conf", lambda: settings)
-    model = agent_bridge.AgentLLMModel(None)
-    request = LLMRequest(messages=[{"role": "user", "content": "Hello"}])
-    list(model.call_stream(request) if stream else model.call(request))
+def test_minimax_default_reaches_http_with_adaptive_thinking(monkeypatch, transport, stream):
+    monkeypatch.setattr(minimax_bot, "conf", lambda: {})
+    bot = minimax_bot.MinimaxBot()
+    list(bot.call_with_tools([{"role": "user", "content": "Hello"}], stream=stream,
+                             thinking={"type": "adaptive"}, reasoning_effort="max"))
     payload = transport[0][0][1]
     assert payload["model"] == const.MINIMAX_M3_1_FLASH
     assert payload["thinking"] == {"type": "adaptive"}
     assert payload["reasoning_effort"] == "max"
     assert "service_tier" not in payload
     from agent.protocol.agent import resolve_family_spec
-    assert resolve_family_spec(model.model) == (1000000, 524288)
+    assert resolve_family_spec(bot.args["model"]) == (1000000, 524288)
 
 
 def test_legacy_agent_options_remain_unsent(monkeypatch, transport):
@@ -166,9 +170,10 @@ def test_legacy_agent_options_remain_unsent(monkeypatch, transport):
     assert "reasoning_effort" not in payload
 
 
-def test_non_minimax_default_is_unchanged(monkeypatch):
+@pytest.mark.parametrize("settings", [{}, {"bot_type": const.MiniMax}])
+def test_global_agent_default_is_unchanged(monkeypatch, settings):
     from bridge import agent_bridge
-    monkeypatch.setattr(agent_bridge, "conf", lambda: {})
+    monkeypatch.setattr(agent_bridge, "conf", lambda: settings)
     assert agent_bridge.AgentLLMModel(None).model == const.DEFAULT_MODEL
 
 
@@ -176,10 +181,16 @@ def test_picker_defaults_and_saved_catalog_overrides(monkeypatch):
     from channel.web.api.models import ModelsHandler
     from channel.web.core.providers import PROVIDER_MODELS
 
-    assert PROVIDER_MODELS["minimax"]["models"] == [const.MINIMAX_M3_1_FLASH, const.MINIMAX_M3]
-    assert [m for m in PROVIDER_MODELS["linkai"]["models"] if m.startswith("MiniMax")] == [const.MINIMAX_M3]
+    assert PROVIDER_MODELS["minimax"]["models"] == [
+        const.MINIMAX_M3_1_FLASH, const.MINIMAX_M3, const.MINIMAX_M2_7, const.MINIMAX_M2_7_HIGHSPEED,
+    ]
+    assert [m for m in PROVIDER_MODELS["linkai"]["models"] if m.startswith("MiniMax")] == [
+        const.MINIMAX_M3_1_FLASH, const.MINIMAX_M3, const.MINIMAX_M2_7_HIGHSPEED, const.MINIMAX_M2_7,
+    ]
     catalog = ModelsHandler._merged_catalog("minimax", catalog_map={}, hidden_map={})
-    assert [e["name"] for e in catalog if "text" in e["capabilities"]] == [const.MINIMAX_M3_1_FLASH, const.MINIMAX_M3]
+    assert [e["name"] for e in catalog if "text" in e["capabilities"]] == [
+        const.MINIMAX_M3_1_FLASH, const.MINIMAX_M3, const.MINIMAX_M2_7, const.MINIMAX_M2_7_HIGHSPEED,
+    ]
     assert catalog[0]["context_window"] == 1000000
     assert catalog[0]["max_output_tokens"] == 524288
     saved = {"name": "MiniMax-M2.7", "capabilities": ["text"], "context_window": 12345}

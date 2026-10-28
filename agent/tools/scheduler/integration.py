@@ -593,6 +593,7 @@ def _remember_delivered_output(
     channel_type: str,
     content: str,
     agent_id: str = None,
+    run_id: str = "",
 ) -> None:
     """Best-effort persistence of the message the scheduler sent to a user.
 
@@ -637,6 +638,18 @@ def _remember_delivered_output(
             }
             if hasattr(agent_bridge, "agent_registry"):
                 kwargs["agent_id"] = agent_id
+            if run_id:
+                import inspect
+
+                try:
+                    params = inspect.signature(remember).parameters.values()
+                    if any(
+                        p.name == "run_id" or p.kind == inspect.Parameter.VAR_KEYWORD
+                        for p in params
+                    ):
+                        kwargs["run_id"] = run_id
+                except (TypeError, ValueError):
+                    pass
             remember(session_id, str(content), **kwargs)
     except Exception as e:
         logger.warning(
@@ -702,6 +715,38 @@ def _record_scheduler_run(task: dict, agent_id: str, trigger: str = "scheduled")
         return None
 
 
+def _task_permission_mode(task: dict, agent_id: str = None) -> str:
+    """The permission mode a scheduled Agent run executes under.
+
+    A run gets its own ``scheduler_*`` session with no override, which would
+    fall back to the instance-wide mode. Instead it takes the stricter of the
+    mode recorded when the task was created and the mode the originating
+    conversation has now, so a task can neither do more than the conversation
+    that created it nor outlive a later downgrade of that conversation. Tasks
+    stored before the origin was recorded use the conversation they deliver to.
+    """
+    from agent.permission import MODES, global_mode, normalize_mode
+    from agent.workspace import session_prefs
+
+    action = task.get("action") or {}
+    current = global_mode()
+    session_id = action.get("origin_session_id") or action.get("notify_session_id")
+    if session_id:
+        try:
+            pinned = session_prefs.get_prefs(
+                session_id, action.get("origin_agent_id") or agent_id
+            ).get("permission")
+        except Exception as e:
+            logger.warning(f"[Scheduler] Task {task.get('id')}: could not read session permission: {e}")
+            pinned = None
+        if pinned:
+            current = normalize_mode(pinned, current)
+    recorded = action.get("permission_mode")
+    if recorded:
+        return min(normalize_mode(recorded, current), current, key=MODES.index)
+    return current
+
+
 def _run_scheduled_task(
     task: dict, agent_bridge, agent_id: str, trigger: str = "scheduled"
 ) -> bool:
@@ -732,7 +777,7 @@ def _run_scheduled_task(
         return False
 
     run = _record_scheduler_run(task, agent_id, trigger=trigger)
-    sink: Dict[str, str] = {}
+    sink: Dict[str, str] = {"run_id": run[1]} if run is not None else {}
     status = "done"
     error = ""
     try:
@@ -849,6 +894,7 @@ def _execute_agent_task(
         # Use Agent to execute the task
         # Mark this as a scheduled task execution to prevent recursive task creation
         context["is_scheduled_task"] = True
+        context["delegated_permission_mode"] = _task_permission_mode(task, agent_id)
         
         try:
             # Don't clear history - scheduler tasks use isolated session_id so they won't pollute user conversations
@@ -888,7 +934,8 @@ def _execute_agent_task(
             if output_sink is not None:
                 output_sink["preview"] = str(reply.content)
             _remember_delivered_output(
-                agent_bridge, task, channel_type, reply.content, agent_id
+                agent_bridge, task, channel_type, reply.content, agent_id,
+                run_id=(output_sink or {}).get("run_id", ""),
             )
             logger.info(f"[Scheduler] Task {task['id']} executed successfully, result sent to {receiver}")
             return True
@@ -980,7 +1027,8 @@ def _execute_send_message(
         if output_sink is not None:
             output_sink["preview"] = str(content)
         _remember_delivered_output(
-            agent_bridge, task, channel_type, content, agent_id
+            agent_bridge, task, channel_type, content, agent_id,
+            run_id=(output_sink or {}).get("run_id", ""),
         )
         logger.info(f"[Scheduler] Task {task['id']} executed: sent message to {receiver}")
         return True
@@ -1060,7 +1108,8 @@ def _execute_tool_call(
         if output_sink is not None:
             output_sink["preview"] = str(content)
         _remember_delivered_output(
-            agent_bridge, task, channel_type, content, agent_id
+            agent_bridge, task, channel_type, content, agent_id,
+            run_id=(output_sink or {}).get("run_id", ""),
         )
         logger.info(f"[Scheduler] Task {task['id']} executed: sent tool result to {receiver}")
         return True
@@ -1114,6 +1163,7 @@ def _execute_skill_call(
             context["msg"] = None
         elif channel_type == "wecom_bot":
             context["msg"] = None
+        context["delegated_permission_mode"] = _task_permission_mode(task, agent_id)
 
         try:
             reply = agent_bridge.agent_reply(query, context=context, on_event=None, clear_history=False)
@@ -1164,7 +1214,8 @@ def _execute_skill_call(
         if output_sink is not None:
             output_sink["preview"] = str(summary)
         _remember_delivered_output(
-            agent_bridge, task, channel_type, summary, agent_id
+            agent_bridge, task, channel_type, summary, agent_id,
+            run_id=(output_sink or {}).get("run_id", ""),
         )
         logger.info(f"[Scheduler] Task {task['id']} executed: skill result sent to {receiver}")
         return True
