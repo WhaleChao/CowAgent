@@ -94,15 +94,28 @@ def test_failed_occurrence_preserves_callback_reschedule(tmp_path, monkeypatch):
     assert store.get_task("reminder")["next_run_at"] == FUTURE
 
 
-def test_disabling_inflight_once_task_keeps_it_available(tmp_path, monkeypatch):
+@pytest.mark.parametrize("kind", ["once", "interval"])
+def test_disabling_inflight_task_still_consumes_its_occurrence(tmp_path, monkeypatch, kind):
     monkeypatch.setattr(scheduler_service, "datetime", FixedDatetime)
-    store = due_store(tmp_path)
+    store = due_store(tmp_path, kind)
+    observed = []
 
     def execute(task):
-        store.update_task(task["id"], {"enabled": False})
+        observed.append(task["id"])
+        store.enable_task(task["id"], False)
 
-    SchedulerService(store, execute)._check_and_execute_tasks()
-    assert store.get_task("reminder")["enabled"] is False
+    service = SchedulerService(store, execute)
+    service._check_and_execute_tasks()
+    saved = store.get_task("reminder")
+    if kind == "once":
+        assert saved is None
+    else:
+        assert saved["enabled"] is False
+        assert saved["next_run_at"] == (FIXED + timedelta(seconds=300)).isoformat()
+        assert saved["last_run_at"] == FIXED.isoformat()
+        store.enable_task("reminder", True)
+        service._check_and_execute_tasks()
+        assert observed == ["reminder"]
 
 
 def test_renaming_does_not_prevent_interval_advance(tmp_path, monkeypatch):
@@ -158,3 +171,24 @@ def test_explicit_default_enabled_does_not_block_completion(tmp_path, monkeypatc
         store.get_task("reminder")["next_run_at"]
         == (FIXED + timedelta(seconds=300)).isoformat()
     )
+
+
+@pytest.mark.parametrize("kind", ["once", "interval"])
+def test_edited_occurrence_records_completion_without_changing_new_schedule(
+    tmp_path, monkeypatch, kind
+):
+    monkeypatch.setattr(scheduler_service, "datetime", FixedDatetime)
+    messages = []
+    monkeypatch.setattr(scheduler_service.logger, "debug", messages.append)
+    store = due_store(tmp_path, kind)
+    replacement = {"type": "interval", "seconds": 900}
+
+    def execute(task):
+        store.update_task(task["id"], {"schedule": replacement, "next_run_at": FUTURE})
+
+    SchedulerService(store, execute)._check_and_execute_tasks()
+    saved = TaskStore(store.store_path).get_task("reminder")
+    assert saved["schedule"] == replacement
+    assert saved["next_run_at"] == FUTURE
+    assert saved["last_run_at"] == FIXED.isoformat()
+    assert any("reminder" in message and "changed" in message for message in messages)

@@ -8,6 +8,7 @@ import threading
 from datetime import datetime
 from typing import Dict, List, Optional
 from common.atomic_write import write_text_atomic
+from common.log import logger
 from common.utils import expand_path
 
 
@@ -201,12 +202,13 @@ class TaskStore:
         return True
     
     def finish_scheduled_run(self, task_id: str, expected: dict,
-                             updates: Optional[dict]) -> bool:
+                             updates: Optional[dict], *, last_run_at: str) -> bool:
         """Advance/remove only the scheduling state the completed run observed.
 
         A user can edit or delete a task while its callback is running. Compare
         under the store lock so completion cannot overwrite a newer schedule.
-        ``updates=None`` consumes an unchanged one-time task.
+        ``updates=None`` consumes an unchanged one-time task. If its schedule
+        changed, retain that edit but record that the previous run completed.
         """
         with self.lock:
             tasks = self.load_tasks()
@@ -216,12 +218,20 @@ class TaskStore:
             if any(
                 current.get(key) != expected.get(key)
                 for key in ("schedule", "next_run_at")
-            ) or current.get("enabled", True) != expected.get("enabled", True):
+            ):
+                current["last_run_at"] = last_run_at
+                current["updated_at"] = datetime.now().isoformat()
+                self.save_tasks(tasks)
+                logger.debug(
+                    f"[Scheduler] Task {task_id} changed during execution; "
+                    "recorded completion without advancing its edited schedule"
+                )
                 return False
             if updates is None:
                 del tasks[task_id]
             else:
                 current.update(updates)
+                current["last_run_at"] = last_run_at
                 current["updated_at"] = datetime.now().isoformat()
             self.save_tasks(tasks)
             return True

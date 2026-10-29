@@ -150,15 +150,16 @@ class SchedulerService:
                         continue
 
                     next_run = self._calculate_next_run(task, now)
+                    last_run_at = format_scheduled_time(scheduled_reference_time(task, now))
                     if next_run:
-                        completed_at = scheduled_reference_time(task, now)
-                        self.task_store.finish_scheduled_run(task['id'], observed_task, {
-                            "next_run_at": format_scheduled_time(next_run),
-                            "last_run_at": format_scheduled_time(completed_at)
-                        })
+                        self.task_store.finish_scheduled_run(
+                            task['id'], observed_task,
+                            {"next_run_at": format_scheduled_time(next_run)},
+                            last_run_at=last_run_at,
+                        )
                     else:
                         removed = self.task_store.finish_scheduled_run(
-                            task['id'], observed_task, None
+                            task['id'], observed_task, None, last_run_at=last_run_at
                         )
                         if removed:
                             logger.info(f"[Scheduler] One-time task completed and removed: {task['id']}")

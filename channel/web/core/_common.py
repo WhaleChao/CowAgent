@@ -210,6 +210,18 @@ def _is_password_enabled():
     return bool(_get_web_password())
 
 
+def _client_ip() -> str:
+    env = getattr(web.ctx, "env", {}) or {}
+    addr = (env.get("REMOTE_ADDR") or "").strip()
+    # Forwarding headers are only believed from a proxy on this machine;
+    # anyone else could set them to dodge the per-client limits.
+    if addr in ("::1", "::ffff:127.0.0.1") or addr.startswith("127."):
+        forwarded = (env.get("HTTP_X_FORWARDED_FOR") or "").split(",")[0].strip()
+        real = (env.get("HTTP_X_REAL_IP") or "").strip()
+        return forwarded or real or addr
+    return addr or "unknown"
+
+
 # Set once the console owns its socket. The desktop watchdog waits on this to
 # tell "still starting" apart from "wedged and never going to answer".
 SERVING = threading.Event()
@@ -833,16 +845,24 @@ def _live_channel_manager():
 def _serve_allowed_roots() -> list:
     """Roots that /api/file and /preview may read from (symlinks resolved).
 
-    Includes the configured serve root, the Agent workspace, and any project
-    directory a session has opened. Project dirs may live outside the serve
-    root (e.g. ``/tmp/foo``), so previewing files in an opened project would
-    otherwise be denied.
+    Includes the configured serve root, all configured Agent workspaces
+    (including disabled Agents), and any project directory a session has
+    opened. Project dirs may live outside the serve root (e.g. ``/tmp/foo``),
+    so previewing files in an opened project would otherwise be denied.
     """
     serve_root = conf().get("web_file_serve_root", "~") or "~"
     roots = [
         os.path.realpath(os.path.expanduser(serve_root)),
         os.path.realpath(_get_workspace_root()),
     ]
+    # Artifact URLs are global, and the artifact index includes disabled
+    # Agents too. Their explicitly configured workspaces remain readable.
+    try:
+        from agent.registry import get_agent_registry
+        for profile in get_agent_registry().list(include_disabled=True):
+            roots.append(os.path.realpath(profile.workspace))
+    except Exception:
+        pass
     try:
         from agent.workspace import project_store
         for rec in project_store.list_recents():
