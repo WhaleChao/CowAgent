@@ -12,8 +12,10 @@ from agent.tools.browser.chrome_launcher import ChromeLauncher
 @pytest.mark.skipif(sys.platform == "win32", reason="profile discovery is POSIX only")
 @pytest.mark.parametrize("profile_name", ["profile", "profile with spaces"])
 @pytest.mark.parametrize("case", ["exact_end", "exact_middle", "sibling", "renderer"])
-def test_native_process_discovery_matches_profile_boundary(tmp_path, profile_name, case):
-    profile = str(tmp_path / profile_name)
+def test_native_process_discovery_matches_profile_boundary(tmp_path, monkeypatch, profile_name, case):
+    monkeypatch.setenv("COLUMNS", "80")
+    # Long values expose process-list truncation on GNU ps.
+    profile = str(tmp_path / ("long-profile-" * 8) / profile_name)
     value = profile + ("-backup" if case == "sibling" else "")
     flags = ["--remote-debugging-port=9999", f"--user-data-dir={value}"]
     if case == "exact_middle":

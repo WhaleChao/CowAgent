@@ -124,7 +124,7 @@ class ChromeLauncher:
             return []
         try:
             listing = subprocess.run(
-                ["ps", "-Ao", "pid=,state=,command="],
+                ["ps", "-Aww", "-o", "pid=,state=,command="],
                 capture_output=True, text=True, errors="replace", timeout=5,
             ).stdout
         except (OSError, subprocess.SubprocessError):
