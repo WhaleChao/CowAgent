@@ -17,7 +17,7 @@ from common import const
 from agent.protocol.message_utils import drop_orphaned_tool_results_openai
 
 
-NATIVE_VISION_MODELS = frozenset({const.MINIMAX_M3.lower()})
+NATIVE_VISION_MODELS = frozenset({const.MINIMAX_M3_1_FLASH.lower(), const.MINIMAX_M3.lower()})
 
 
 # MiniMax对话模型API
@@ -25,7 +25,7 @@ class MinimaxBot(Bot):
     def __init__(self):
         super().__init__()
         self.args = {
-            "model": conf().get("model") or "MiniMax-M3",
+            "model": conf().get("model") or const.MINIMAX_M3_1_FLASH,
             "temperature": conf().get("temperature", 0.3),
             "top_p": conf().get("top_p", 0.95),
         }
@@ -90,6 +90,8 @@ class MinimaxBot(Bot):
                 reply = Reply(ReplyType.ERROR, reply_content["content"])
             elif reply_content["completion_tokens"] > 0:
                 self.sessions.session_reply(reply_content["content"], session_id, reply_content["total_tokens"])
+                if reply_content.get("reasoning_content"):
+                    session.messages[-1]["reasoning_content"] = reply_content["reasoning_content"]
                 reply = Reply(ReplyType.TEXT, reply_content["content"])
             else:
                 reply = Reply(ReplyType.ERROR, reply_content["content"])
@@ -141,6 +143,7 @@ class MinimaxBot(Bot):
                     "total_tokens": total_tokens,
                     "completion_tokens": completion_tokens,
                     "content": content,
+                    "reasoning_content": result["choices"][0]["message"].get("reasoning_content", ""),
                 }
             else:
                 error_msg = response.text
@@ -289,9 +292,21 @@ class MinimaxBot(Bot):
             if converted_tools:
                 request_body["tools"] = converted_tools
 
-            # Add reasoning_split=True for better thinking control (M2.1 feature)
-            # This separates thinking content into reasoning_details field
+            # Keep thinking separate from user-visible text and replay it on
+            # subsequent tool turns. Flash always uses adaptive thinking.
             request_body["reasoning_split"] = True
+            thinking = kwargs.get("thinking")
+            effort = kwargs.get("reasoning_effort")
+            is_flash = model.lower() == const.MINIMAX_M3_1_FLASH.lower()
+            if is_flash and thinking is not None:
+                thinking = {"type": "adaptive"}
+            elif model.lower() == const.MINIMAX_M3.lower() and thinking and thinking.get("type") == "enabled":
+                thinking = {"type": "adaptive"}
+            if model.lower() in NATIVE_VISION_MODELS:
+                if thinking is not None:
+                    request_body["thinking"] = thinking
+                if is_flash and effort in ("low", "medium", "high", "xhigh", "max"):
+                    request_body["reasoning_effort"] = effort
 
             logger.debug(f"[MINIMAX] API call: model={model}, tools={len(converted_tools) if converted_tools else 0}, stream={stream}")
 
@@ -330,7 +345,11 @@ class MinimaxBot(Bot):
             role = msg.get("role")
             content = msg.get("content")
 
-            if role == "user":
+            if role in ("system", "tool") or (role == "assistant" and not isinstance(content, list)):
+                allowed = ("role", "content", "tool_calls", "tool_call_id", "name",
+                           "reasoning_content", "reasoning_details")
+                converted.append({key: msg[key] for key in allowed if key in msg})
+            elif role == "user":
                 # Handle user message
                 if isinstance(content, list):
                     has_tool_result = any(
@@ -383,11 +402,14 @@ class MinimaxBot(Bot):
                     # Parse content blocks
                     text_parts = []
                     tool_calls = []
+                    thinking_parts = []
 
                     for block in content:
                         if isinstance(block, dict):
                             if block.get("type") == "text":
                                 text_parts.append(block.get("text", ""))
+                            elif block.get("type") == "thinking":
+                                thinking_parts.append(block.get("thinking", ""))
                             elif block.get("type") == "tool_use":
                                 # Convert to OpenAI tool_calls format
                                 tool_calls.append({
@@ -398,6 +420,9 @@ class MinimaxBot(Bot):
                                         "arguments": json.dumps(block.get("input", {}))
                                     }
                                 })
+
+                    if thinking_parts:
+                        openai_msg["reasoning_content"] = "".join(thinking_parts)
 
                     # Set content (can be empty if only tool calls)
                     if text_parts:
@@ -485,8 +510,14 @@ class MinimaxBot(Bot):
                 "content": []
             }
 
-            # Add reasoning_details (thinking) if present
-            if "reasoning_details" in message:
+            if message.get("reasoning_content"):
+                response_data["content"].append({
+                    "type": "thinking",
+                    "thinking": message["reasoning_content"],
+                })
+
+            # Retain compatibility with older reasoning_details responses.
+            elif "reasoning_details" in message:
                 for reasoning in message["reasoning_details"]:
                     if "text" in reasoning:
                         response_data["content"].append({
@@ -606,8 +637,14 @@ class MinimaxBot(Bot):
                 choice = chunk["choices"][0]
                 delta = choice.get("delta", {})
 
-                # Handle reasoning_details (thinking)
-                if "reasoning_details" in delta:
+                if delta.get("reasoning_content"):
+                    yield {"choices": [{"index": 0, "delta": {
+                        "role": "assistant",
+                        "reasoning_content": delta["reasoning_content"],
+                    }}]}
+
+                # Retain compatibility with older reasoning_details responses.
+                elif "reasoning_details" in delta:
                     for reasoning in delta["reasoning_details"]:
                         if "text" in reasoning:
                             reasoning_id = reasoning.get("id", "reasoning-text-1")
