@@ -84,6 +84,30 @@ _MESSAGE_FORMAT_MARKERS = (
 )
 
 
+# Transient failures (timeouts, overload, 429 / 5xx) worth retrying unchanged.
+_RETRYABLE_MARKERS = (
+    'timeout', 'timed out', 'connection', 'network',
+    'rate limit', 'overloaded', 'unavailable', 'busy', 'retry',
+    '429', '500', '502', '503', '504', '512',
+)
+
+# Image references the channels append to the user query, e.g. "[图片: tmp/a.png]".
+_IMAGE_MARKER_RE = re.compile(r"\[(?:图片|Image):\s*([^\]]+)\]")
+_IMAGE_NOT_ATTACHED = "(The images referenced above are not attached to this request; use the vision tool if you need to view them.)"
+
+
+def _user_text(content) -> str:
+    """Text of a user message, skipping tool results."""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    return "\n".join(
+        b.get("text", "") for b in content
+        if isinstance(b, dict) and b.get("type") == "text"
+    )
+
+
 def _is_context_overflow(error_str_lower: str) -> bool:
     if "[context_overflow]" in error_str_lower:
         return True
@@ -304,6 +328,11 @@ class AgentStreamExecutor:
         # This run's user query, the anchor callers use to find the messages
         # the run added (see run_start_index).
         self.run_user_message = None
+        # Images attached to the query, sent with it only while this run lasts
+        # (see _run_image_blocks); never written into self.messages.
+        self._run_images: Optional[List[Dict[str, Any]]] = None
+        self._run_images_disabled = False
+        self._images_in_request = False
         
         # Tool failure tracking for retry protection
         self.tool_failure_history = []  # List of (tool_name, args_hash, success) tuples
@@ -318,6 +347,11 @@ class AgentStreamExecutor:
         # Provider usage summed over every model call of this run; StepWriter
         # stamps it on the stored answer.
         self.run_usage: Optional[Dict[str, int]] = None
+
+        # The loop-breaker hint rides in the message list so the next model
+        # call sees it, then it is removed again: the user never wrote it, so
+        # it must not be stored as a user turn or summarised into memory.
+        self._pending_loop_hint: Optional[Dict[str, Any]] = None
 
     @staticmethod
     def _normalize_stream_usage(stream_usage: Dict[str, Any]) -> Dict[str, int]:
@@ -887,6 +921,41 @@ class AgentStreamExecutor:
         if len(self.tool_failure_history) > 50:
             self.tool_failure_history = self.tool_failure_history[-50:]
 
+    def _inject_loop_hint(self) -> None:
+        """Tell the model to answer with what it already has, for one call.
+
+        The hint is appended to the message list so the very next model call
+        sees it, then removed by :meth:`_drop_pending_loop_hint`. A message
+        the user never wrote must not outlive that call: stored as a user
+        turn it would show up in the chat history and be summarised into the
+        daily memory as if it were the user's request.
+        """
+        hint = {
+            "role": "user",
+            "content": [{
+                "type": "text",
+                "text": _t(
+                    "工具已成功执行并返回结果。请基于这些信息向用户做出回复，不要重复调用相同的工具。",
+                    "The tool already ran successfully and returned its result. Reply to the "
+                    "user from that result; do not call the same tool with the same arguments again.",
+                ),
+            }],
+        }
+        self.messages.append(hint)
+        self._pending_loop_hint = hint
+
+    def _drop_pending_loop_hint(self) -> None:
+        """Remove the loop hint the previous model call consumed, if any.
+
+        Removed by identity rather than index: steering, retries and context
+        compaction can insert or rebuild messages between injection and
+        removal. A hint compaction already discarded is simply forgotten.
+        """
+        hint, self._pending_loop_hint = self._pending_loop_hint, None
+        if hint is None:
+            return
+        self.messages[:] = [msg for msg in self.messages if msg is not hint]
+
     def run_stream(self, user_message: str) -> str:
         """
         Execute streaming reasoning loop
@@ -908,6 +977,8 @@ class AgentStreamExecutor:
             ]
         }
         self.messages.append(self.run_user_message)
+        self._run_images = None
+        self._run_images_disabled = False
 
         # Trim context ONCE before the agent loop starts, not during tool steps.
         # This ensures tool_use/tool_result chains created during the current run
@@ -1001,8 +1072,14 @@ class AgentStreamExecutor:
                 logger.info(f"[Agent] Turn {turn}")
                 self._emit_event("turn_start", {"turn": turn})
 
-                # Call LLM (enable retry_on_empty for better reliability)
-                assistant_msg, tool_calls, stop_reason = self._call_llm_stream(retry_on_empty=True)
+                # Call LLM (enable retry_on_empty for better reliability). Any
+                # loop hint injected by the previous tool turn was meant for
+                # this call only, so drop it as the call returns - success or
+                # error alike.
+                try:
+                    assistant_msg, tool_calls, stop_reason = self._call_llm_stream(retry_on_empty=True)
+                finally:
+                    self._drop_pending_loop_hint()
                 final_response = assistant_msg
 
                 # A steer that arrived while the model was streaming takes
@@ -1256,14 +1333,11 @@ class AgentStreamExecutor:
                                     f"⚠️  Detected potential loop: '{tool_name}' called {recent_success_count} times "
                                     f"with same args. Adding hint to LLM to provide final response."
                                 )
-                                # Add a gentle hint message to guide LLM to respond
-                                self.messages.append({
-                                    "role": "user",
-                                    "content": [{
-                                        "type": "text",
-                                        "text": "工具已成功执行并返回结果。请基于这些信息向用户做出回复，不要重复调用相同的工具。"
-                                    }]
-                                })
+                                # Add a gentle hint message to guide LLM to respond.
+                                # It is temporary: the next model call sees it and
+                                # then drops it, so it never becomes a user turn in
+                                # the persisted conversation.
+                                self._inject_loop_hint()
                     elif tool_calls:
                         # If we have tool_calls but no tool_result_blocks (unexpected error),
                         # create error results for all tool calls to maintain message integrity
@@ -1333,6 +1407,9 @@ class AgentStreamExecutor:
                             and self.messages[prompt_insert_idx].get("role") == "user"):
                         self.messages.pop(prompt_insert_idx)
                         logger.debug("[Agent] Removed injected max-steps prompt from message history")
+                    # A hint injected by the last tool turn was consumed by this
+                    # summary call; drop it before the run winds down.
+                    self._drop_pending_loop_hint()
 
         except AgentCancelledError:
             # User-initiated stop: wind down message history cleanly so the
@@ -1354,6 +1431,10 @@ class AgentStreamExecutor:
                 clear_agent_run_id(_run_token)
             if self.steer_inbox is not None:
                 self.steer_inbox.close()
+            # Safety net for exits that never reached the next model call:
+            # cancel, an exception, or a run that ended on a tool turn. The
+            # hint is not part of the conversation, so no exit may keep it.
+            self._drop_pending_loop_hint()
             final_response = final_response.strip() if final_response else final_response
             if cancelled:
                 # Emit before agent_end so channels can mark UI as cancelled
@@ -1609,6 +1690,7 @@ class AgentStreamExecutor:
 
         # Prepare messages
         messages = self._prepare_messages()
+        sent_images = getattr(self, "_images_in_request", False)
         turns = self._identify_complete_turns()
         logger.info(f"Sending {len(messages)} messages ({len(turns)} turns) to LLM")
 
@@ -1842,6 +1924,21 @@ class AgentStreamExecutor:
         except Exception as e:
             error_str = str(e)
             error_str_lower = error_str.lower()
+
+            # The model may not accept images after all. Retry without them before
+            # the classification below, which could read the rejection as a broken
+            # history and reset the context; the vision tool still covers the images.
+            if sent_images and not any(m in error_str_lower for m in _RETRYABLE_MARKERS):
+                self._run_images_disabled = True
+                logger.warning(f"[Agent] Request with attached images failed, retrying without them: {e}")
+                return self._call_llm_stream(
+                    retry_on_empty=retry_on_empty,
+                    retry_count=retry_count,
+                    max_retries=max_retries,
+                    _overflow_stage=_overflow_stage,
+                    _on_fallback=_on_fallback,
+                    _exhausted=_exhausted,
+                )
             
             # Context overflow is non-retryable and needs the working context reset.
             is_context_overflow = _is_context_overflow(error_str_lower)
@@ -1904,11 +2001,7 @@ class AgentStreamExecutor:
             is_rate_limit = '429' in error_str_lower or 'rate limit' in error_str_lower
             
             # Check if error is retryable (timeout, connection, server busy, etc.)
-            is_retryable = any(keyword in error_str_lower for keyword in [
-                'timeout', 'timed out', 'connection', 'network', 
-                'rate limit', 'overloaded', 'unavailable', 'busy', 'retry',
-                '429', '500', '502', '503', '504', '512'
-            ])
+            is_retryable = any(keyword in error_str_lower for keyword in _RETRYABLE_MARKERS)
             
             # A fallback link gets a single attempt. Giving every link the
             # primary's full retry budget would multiply the wait by the chain
@@ -2959,4 +3052,56 @@ class AgentStreamExecutor:
         not as a message. The AgentLLMModel will handle this.
         """
         # Don't add system message here - it will be handled separately by the LLM adapter
-        return self.messages
+        images = self._run_image_blocks()
+        self._images_in_request = False
+        if "vision" not in (self.tools or {}):
+            return self.messages
+
+        prepared = []
+        for msg in self.messages:
+            content = msg.get("content")
+            if msg is self.run_user_message and images and isinstance(content, list):
+                msg = {**msg, "content": content + images}
+                self._images_in_request = True
+            elif msg.get("role") == "user" and _IMAGE_MARKER_RE.search(_user_text(content)):
+                # A model that answered earlier images directly would otherwise
+                # describe one it no longer (or never) received.
+                if isinstance(content, list):
+                    msg = {**msg, "content": content + [{"type": "text", "text": _IMAGE_NOT_ATTACHED}]}
+                else:
+                    msg = {**msg, "content": f"{content}\n{_IMAGE_NOT_ATTACHED}"}
+            prepared.append(msg)
+        return prepared
+
+    def _run_image_blocks(self) -> List[Dict[str, Any]]:
+        """Image blocks for the query's attached images, when the main model
+        would be the one analyzing them anyway (see Vision.runs_on_main_model).
+
+        Checked per request because a fallback can switch the model mid-run.
+        Later runs only see the "[图片: path]" text, so the image never piles
+        up in the history.
+        """
+        if self._run_images_disabled or self.run_user_message is None:
+            return []
+        vision = (self.tools or {}).get("vision")
+        if vision is None or not hasattr(vision, "runs_on_main_model"):
+            return []
+        vision.model = self.model
+        try:
+            if not vision.runs_on_main_model():
+                return []
+        except Exception as e:
+            logger.debug(f"[Agent] Native image input skipped: {e}")
+            return []
+
+        if self._run_images is None:
+            self._run_images = []
+            for ref in _IMAGE_MARKER_RE.findall(_user_text(self.run_user_message.get("content"))):
+                ref = ref.strip().strip("'\"")
+                try:
+                    self._run_images.append(vision._build_image_content(ref))
+                except Exception as e:
+                    logger.warning(f"[Agent] Cannot attach image {ref}: {e}")
+            if self._run_images:
+                logger.info(f"[Agent] Sending {len(self._run_images)} image(s) to the main model directly")
+        return self._run_images

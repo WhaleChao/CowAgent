@@ -46,6 +46,21 @@
       "source": "/en/:slug*",
       "destination": "/:slug*",
       "permanent": true
+    },
+    {
+      "source": "/guide/desktop-themes",
+      "destination": "/extensions/custom-theme",
+      "permanent": true
+    },
+    {
+      "source": "/zh/guide/desktop-themes",
+      "destination": "/zh/extensions/custom-theme",
+      "permanent": true
+    },
+    {
+      "source": "/ja/guide/desktop-themes",
+      "destination": "/ja/extensions/custom-theme",
+      "permanent": true
     }
   ],
   "navigation": {
@@ -277,9 +292,16 @@
                 ]
               },
               {
+                "group": "Sharing",
+                "pages": [
+                  "extensions/guest-share"
+                ]
+              },
+              {
                 "group": "Customization",
                 "pages": [
-                  "extensions/custom-menu"
+                  "extensions/custom-menu",
+                  "extensions/custom-theme"
                 ]
               },
               {
@@ -551,9 +573,16 @@
                 ]
               },
               {
+                "group": "对外分享",
+                "pages": [
+                  "zh/extensions/guest-share"
+                ]
+              },
+              {
                 "group": "界面定制",
                 "pages": [
-                  "zh/extensions/custom-menu"
+                  "zh/extensions/custom-menu",
+                  "zh/extensions/custom-theme"
                 ]
               },
               {
@@ -824,9 +853,16 @@
                 ]
               },
               {
+                "group": "共有",
+                "pages": [
+                  "ja/extensions/guest-share"
+                ]
+              },
+              {
                 "group": "UI カスタマイズ",
                 "pages": [
-                  "ja/extensions/custom-menu"
+                  "ja/extensions/custom-menu",
+                  "ja/extensions/custom-theme"
                 ]
               },
               {
