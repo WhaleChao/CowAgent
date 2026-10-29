@@ -542,6 +542,8 @@ export interface SessionModelProvider {
   id: string
   label: string | { zh: string; en: string }
   models: string[]
+  // Display names for some of `models` (custom providers only).
+  labels?: Record<string, string>
 }
 
 export interface SessionSettingsState {
@@ -723,6 +725,8 @@ export interface ModelCatalogEntry {
   capabilities: ModelCapability[]
   context_window?: number
   max_output_tokens?: number
+  // Optional display name, custom providers only.
+  alias?: string
 }
 
 export interface ModelProvider {
