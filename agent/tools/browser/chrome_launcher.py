@@ -124,17 +124,18 @@ class ChromeLauncher:
             return []
         try:
             listing = subprocess.run(
-                ["ps", "-Ao", "pid=,state=,command="],
+                ["ps", "-Aww", "-o", "pid=,state=,command="],
                 capture_output=True, text=True, errors="replace", timeout=5,
             ).stdout
         except (OSError, subprocess.SubprocessError):
             return []
         own_pid = self._proc.pid if self._proc else None
         needle = f"--user-data-dir={self._user_data_dir}"
+        profile_arg = re.compile(re.escape(needle) + r"(?=\s|$)")
         found = []
         for line in listing.splitlines():
             # --type= marks renderer/GPU children; only the browser holds the lock.
-            if needle not in line or "--type=" in line:
+            if not profile_arg.search(line) or "--type=" in line:
                 continue
             fields = line.split(maxsplit=2)
             if len(fields) < 3 or fields[1].startswith("Z"):
