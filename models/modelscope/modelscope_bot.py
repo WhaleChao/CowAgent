@@ -213,11 +213,16 @@ class ModelScopeBot(Bot):
                             total_tokens = json_data["usage"].get("total_tokens", 0)
                             completion_tokens = json_data["usage"].get("completion_tokens", 0)
 
-                        delta = json_data.get("choices", [{}])[0].get("delta", {})
+                        # Usage-only chunks may carry an empty choices list.
+                        choices = json_data.get("choices") or []
+                        if not choices:
+                            continue
+
+                        delta = choices[0].get("delta", {})
                         if delta and delta.get("content"):
                             content += delta["content"]
 
-                        choice = json_data.get("choices", [{}])[0]
+                        choice = choices[0]
                         if choice.get("finish_reason"):
                             finish_reason = choice["finish_reason"]
                             
