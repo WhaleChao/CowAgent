@@ -22,7 +22,15 @@ from bridge.reply import Reply, ReplyType
 from common.log import logger
 from config import conf
 from models.chatgpt.chat_gpt_session import ChatGPTSession
-from models.baidu.baidu_wenxin_session import BaiduWenxinSession
+
+
+def _completion_tokens(usage_meta: dict) -> int:
+    """Output tokens of a Gemini usageMetadata: the answer plus the thinking tokens.
+
+    Gemini reports thinking tokens in thoughtsTokenCount, apart from candidatesTokenCount,
+    but bills them as output.
+    """
+    return (usage_meta.get("candidatesTokenCount") or 0) + (usage_meta.get("thoughtsTokenCount") or 0)
 
 
 # OpenAI对话模型API (可用)
@@ -275,7 +283,7 @@ class GoogleGeminiBot(Bot):
                 "content": "".join(text_parts),
                 "usage": {
                     "prompt_tokens": usage_meta.get("promptTokenCount", 0),
-                    "completion_tokens": usage_meta.get("candidatesTokenCount", 0),
+                    "completion_tokens": _completion_tokens(usage_meta),
                     "total_tokens": usage_meta.get("totalTokenCount", 0),
                 },
             }
@@ -324,8 +332,14 @@ class GoogleGeminiBot(Bot):
                     "parts": [{"text": system_prompt}]
                 }
             
+            # "[图片: path]" markers are inlined for the latest user message only,
+            # so earlier images are not re-sent with every turn.
+            last_user_idx = max(
+                (i for i, m in enumerate(messages) if m.get("role") == "user"), default=-1
+            )
+
             # Convert messages to Gemini format
-            for msg in messages:
+            for msg_idx, msg in enumerate(messages):
                 role = msg.get("role")
                 content = msg.get("content", "")
                 
@@ -350,7 +364,11 @@ class GoogleGeminiBot(Bot):
                 # Handle different content formats
                 parts = []
                 
-                if isinstance(content, str):
+                if isinstance(content, str) and msg_idx != last_user_idx:
+                    if content:
+                        parts.append({"text": content})
+
+                elif isinstance(content, str):
                     # Text with optional [图片: /path/to/file] markers
                     cleaned_text, image_paths = self._extract_image_paths_from_text(content)
                     if cleaned_text:
@@ -376,15 +394,11 @@ class GoogleGeminiBot(Bot):
                         block_type = block.get("type")
                         
                         if block_type == "text":
-                            # Text block with optional image markers
+                            # Agent messages: the agent attaches the current
+                            # query's images as image_url blocks itself.
                             block_text = block.get("text", "")
-                            cleaned_text, image_paths = self._extract_image_paths_from_text(block_text)
-                            if cleaned_text:
-                                parts.append({"text": cleaned_text})
-                            for image_path in image_paths:
-                                image_part = self._build_image_inline_part(image_path)
-                                if image_part:
-                                    parts.append(image_part)
+                            if block_text:
+                                parts.append({"text": block_text})
 
                         elif block_type in ["image", "image_url"]:
                             # OpenAI format: {"type":"image_url","image_url":{"url":"..."}}
@@ -434,6 +448,11 @@ class GoogleGeminiBot(Bot):
                                     tool_result_data = tool_content
                             except Exception:
                                 tool_result_data = {"result": tool_content}
+                            # functionResponse.response must be a JSON object;
+                            # tool text that parses to a list or scalar (e.g. an
+                            # MCP tool returning a JSON array) is wrapped.
+                            if not isinstance(tool_result_data, dict):
+                                tool_result_data = {"result": tool_result_data}
                             
                             # Find the tool name from previous messages
                             tool_name = None
@@ -842,7 +861,7 @@ class GoogleGeminiBot(Bot):
                 # reads (prompt_tokens is what the context indicator needs).
                 final_chunk["usage"] = {
                     "prompt_tokens": last_usage_meta.get("promptTokenCount", 0),
-                    "completion_tokens": last_usage_meta.get("candidatesTokenCount", 0),
+                    "completion_tokens": _completion_tokens(last_usage_meta),
                     "total_tokens": last_usage_meta.get("totalTokenCount", 0),
                 }
             yield final_chunk

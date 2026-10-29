@@ -21,22 +21,10 @@ def _iter_docx_blocks(container, parent):
     """Traverse paragraphs and tables in either a document body or a cell."""
     from docx.oxml.ns import qn
     from docx.table import Table
-    from docx.text.paragraph import Paragraph
 
     for element in container.iterchildren():
         if element.tag == qn("w:p"):
-            fields = list(element.iter(qn("w:fldSimple")))
-            if fields:
-                # python-docx skips simple-field containers, although their
-                # child runs hold the displayed result saved by Word. Unwrap
-                # a copy only: read cached text without executing instructions
-                # or removing fields from the caller's document.
-                element = deepcopy(element)
-                for field in list(element.iter(qn("w:fldSimple"))):
-                    for child in list(field):
-                        field.addprevious(child)
-                    field.getparent().remove(field)
-            yield Paragraph(element, parent).text
+            yield _docx_paragraph_text(element, parent)
         elif element.tag == qn("w:sdt"):
             content = element.find(qn("w:sdtContent"))
             if content is not None:
@@ -55,6 +43,24 @@ def _iter_docx_blocks(container, parent):
                         seen_cells.add(cell._tc)
                         values.append("\n".join(_iter_docx_blocks(cell._tc, cell)))
                 yield "\t".join(values)
+
+
+def _docx_paragraph_text(element, parent):
+    """Include inline controls and cached field text without changing the source."""
+    from docx.oxml.ns import qn
+    from docx.text.paragraph import Paragraph
+
+    tags = (qn("w:sdt"), qn("w:fldSimple"))
+    if any(element.find(".//" + tag) is not None for tag in tags):
+        element = deepcopy(element)
+        for control in list(element.iter(*tags)):
+            content = (control.find(qn("w:sdtContent"))
+                       if control.tag == tags[0] else control)
+            if content is not None:
+                for child in list(content):
+                    control.addprevious(child)
+            control.getparent().remove(control)
+    return Paragraph(element, parent).text
 
 
 def iter_pptx_shape_text(shapes):

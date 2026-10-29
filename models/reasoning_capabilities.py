@@ -28,6 +28,7 @@ CLAUDE_XHIGH_MODELS = (
     "claude-opus-4-8",
     "claude-opus-4-7",
     "claude-sonnet-5",
+    "claude-haiku-5",
 )
 CLAUDE_MAX_ONLY_MODELS = (
     "claude-mythos-preview",
@@ -130,6 +131,9 @@ def get_reasoning_capability(provider_id: str, model_name: str = "") -> dict:
             return _capability(DASHSCOPE_HIGH_MAX_VALUES, default="high")
         if model.startswith(DASHSCOPE_MAX_ONLY_MODELS):
             return _capability(DASHSCOPE_MAX_ONLY_VALUES, default="max")
+
+    if base_pid == "minimax" and model == "minimax-m3.1-flash":
+        return _capability(["low", "medium", "high", "xhigh", "max"], default="max", thinking_only=True)
 
     if base_pid == "moonshot" and model.startswith("kimi-k3"):
         return _capability(KIMI_K3_VALUES, default="max", thinking_only=True)

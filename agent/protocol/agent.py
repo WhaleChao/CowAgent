@@ -53,6 +53,9 @@ _MODEL_SPECS = {
     # Qwen: only 3.8-flash ships a 1M window; keep others conservative.
     "qwen": {"prefix": "qwen3.8-flash", "window": 1000000, "max_output": None,
              "fallback_window": 128000},
+    # MiniMax-M3.1-Flash: 1M context, 512K max output.
+    "minimax": {"prefix": "minimax-m3.1-flash", "window": 1000000, "max_output": 524288,
+                "fallback_window": 128000},
 }
 
 

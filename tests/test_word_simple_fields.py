@@ -56,3 +56,34 @@ class WordSimpleFieldsTests(unittest.TestCase):
         document = Document()
         document.add_paragraph("ordinary text")
         self.assertEqual(list(iter_docx_body_text(document)), ["ordinary text"])
+
+
+@pytest.mark.parametrize("outer_tag", ["w:sdt", "w:fldSimple"])
+@pytest.mark.parametrize("in_table", [False, True])
+def test_nested_field_and_content_control_preserve_cached_text(outer_tag, in_table, tmp_path):
+    document = Document()
+    paragraph = (document.add_table(rows=1, cols=1).cell(0, 0).paragraphs[0]
+                 if in_table else document.add_paragraph())
+    add_field(paragraph, "2026-10-20")
+    field = paragraph._p.find(qn("w:fldSimple"))
+    control = OxmlElement("w:sdt")
+    content = OxmlElement("w:sdtContent")
+    control.append(content)
+    if outer_tag == "w:sdt":
+        field.addprevious(control)
+        content.append(field)
+    else:
+        for child in list(field):
+            content.append(child)
+        field.append(control)
+
+    original = document.element.xml
+    assert list(iter_docx_body_text(document)) == ["Date: 2026-10-20 end"]
+    assert list(iter_docx_body_text(document)) == ["Date: 2026-10-20 end"]
+    assert document.element.xml == original
+    path = tmp_path / "nested.docx"
+    document.save(path)
+    result = Read({"cwd": str(tmp_path)}).execute({"path": str(path)})
+    assert result.status == "success", result.result
+    assert "Date: 2026-10-20 end" in result.result["content"]
+    assert "yyyy-MM-dd" not in result.result["content"]
